@@ -8,12 +8,17 @@ values across files.
 import textwrap
 
 # ── Detection / pose thresholds ───────────────────────────────────────────────
-# PADDING controls how much extra space is added around the palm detection bbox
-# before it is cropped and sent to the landmark model.
-# 0.1 = only covers the palm (fingers get clipped → keypoints stuck at y=0)
-# 0.5 = covers the full open hand including all fingertips
 PADDING              = 0.2
 CONFIDENCE_THRESHOLD = 0.5
+
+# ── Stereo depth throttle range (millimetres from camera) ────────────────────
+# Hand THIS close  → T:2000 (full throttle)
+THROTTLE_NEAR_MM = 200    # 20 cm
+# Hand THIS far    → T:1000 (zero throttle)
+THROTTLE_FAR_MM  = 700    # 70 cm
+
+# ── Yaw angle range (degrees of wrist roll, knuckle vector kp5→kp17) ─────────
+YAW_ANGLE_MAX = 15.0
 
 # ── MediaPipe 21-landmark skeleton connections ────────────────────────────────
 HAND_CONNECTIONS = [

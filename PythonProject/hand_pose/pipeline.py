@@ -84,14 +84,15 @@ class ProcessDetections(dai.node.HostNode):
 
 def build_pipeline(device: dai.Device, fps: int) -> Tuple[dai.Pipeline, Dict[str, Any]]:
     """
-    Builds and starts the two-stage hand-pose pipeline.
+    Builds and starts the two-stage hand-pose pipeline with stereo depth.
 
     Returns a dict of output queues:
-        "video" : camera frames  (ImgFrame)
-        "dets"  : palm detections (ImgDetectionsExtended)
-        "kp"    : keypoints       (Keypoints)
-        "conf"  : hand presence   (Predictions)
-        "hand"  : handedness      (Predictions)
+        "video"  : camera frames            (ImgFrame)
+        "dets"   : palm detections          (ImgDetectionsExtended)
+        "kp"     : keypoints                (Keypoints)
+        "conf"   : hand presence score      (Predictions)
+        "hand"   : handedness score         (Predictions)
+        "spatial": spatial location data    (SpatialLocationData) — real Z in mm
     """
     platform   = device.getPlatform().name
     frame_type = (dai.ImgFrame.Type.BGR888p
@@ -111,9 +112,47 @@ def build_pipeline(device: dai.Device, fps: int) -> Tuple[dai.Pipeline, Dict[str
 
     pipeline = dai.Pipeline(device)
 
-    # ── Camera ────────────────────────────────────────────────────────────────
+    # ── RGB Camera ────────────────────────────────────────────────────────────
     cam     = pipeline.create(dai.node.Camera).build()
     cam_out = cam.requestOutput((768, 768), frame_type, fps=fps)
+
+    # ── Stereo depth ──────────────────────────────────────────────────────────
+    # Mono left + right → StereoDepth → SpatialLocationCalculator
+    mono_left  = pipeline.create(dai.node.MonoCamera)
+    mono_right = pipeline.create(dai.node.MonoCamera)
+    mono_left.setBoardSocket(dai.CameraBoardSocket.CAM_B)
+    mono_right.setBoardSocket(dai.CameraBoardSocket.CAM_C)
+    mono_left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
+    mono_right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
+    mono_left.setFps(fps)
+    mono_right.setFps(fps)
+
+    stereo = pipeline.create(dai.node.StereoDepth)
+    stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.FAST_DENSITY)
+    stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)
+    stereo.setOutputSize(mono_left.getResolutionWidth(),
+                         mono_left.getResolutionHeight())
+    stereo.setSubpixel(False)   # subpixel costs extra shaves — keep off for RVC2
+    mono_left.out.link(stereo.left)
+    mono_right.out.link(stereo.right)
+
+    # SpatialLocationCalculator — samples a small ROI around the wrist area.
+    # We start with a fixed center ROI; renderer updates it each frame with
+    # the real kp[0] (wrist) position so it tracks the hand.
+    spatial_calc = pipeline.create(dai.node.SpatialLocationCalculator)
+    spatial_calc.inputConfig.setWaitForMessage(False)
+
+    # Initial ROI — center of frame, small region (will be overridden at runtime)
+    initial_cfg = dai.SpatialLocationCalculatorConfigData()
+    initial_cfg.roi                        = dai.Rect(dai.Point2f(0.45, 0.45),
+                                                      dai.Point2f(0.55, 0.55))
+    initial_cfg.calculationAlgorithm      = \
+        dai.SpatialLocationCalculatorAlgorithm.MEDIAN
+    initial_cfg.depthThresholds.lowerThreshold = 100
+    initial_cfg.depthThresholds.upperThreshold = 10000
+    spatial_calc.initialConfig.addROI(initial_cfg)
+
+    stereo.depth.link(spatial_calc.inputDepth)
 
     # ── Resize → palm detector ────────────────────────────────────────────────
     resize = pipeline.create(dai.node.ImageManip)
@@ -161,14 +200,16 @@ def build_pipeline(device: dai.Device, fps: int) -> Tuple[dai.Pipeline, Dict[str
         pose_manip.out, pose_archive)
 
     # ── Output queues — ALL created BEFORE pipeline.start() ──────────────────
-    # Do NOT use pose_nn.outputs (internal Sync node deadlocks when no hand
-    # is detected). Subscribe to each head separately and match by seqnum.
     queues = {
-        "video": cam_out.createOutputQueue(maxSize=4,  blocking=False),
-        "dets":  det_nn.out.createOutputQueue(maxSize=8, blocking=False),
-        "kp":    pose_nn.getOutput(0).createOutputQueue(maxSize=8, blocking=False),
-        "conf":  pose_nn.getOutput(1).createOutputQueue(maxSize=8, blocking=False),
-        "hand":  pose_nn.getOutput(2).createOutputQueue(maxSize=8, blocking=False),
+        "video":   cam_out.createOutputQueue(maxSize=4,  blocking=False),
+        "dets":    det_nn.out.createOutputQueue(maxSize=8, blocking=False),
+        "kp":      pose_nn.getOutput(0).createOutputQueue(maxSize=8, blocking=False),
+        "conf":    pose_nn.getOutput(1).createOutputQueue(maxSize=8, blocking=False),
+        "hand":    pose_nn.getOutput(2).createOutputQueue(maxSize=8, blocking=False),
+        # Stereo spatial depth — Z in mm aligned to RGB frame
+        "spatial": spatial_calc.out.createOutputQueue(maxSize=8, blocking=False),
+        # Input queue so renderer can push updated ROI configs each frame
+        "spatial_cfg": spatial_calc.inputConfig.createInputQueue(),
     }
 
     pipeline.start()
