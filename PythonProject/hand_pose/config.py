@@ -8,7 +8,11 @@ values across files.
 import textwrap
 
 # ── Detection / pose thresholds ───────────────────────────────────────────────
-PADDING              = 0.1
+# PADDING controls how much extra space is added around the palm detection bbox
+# before it is cropped and sent to the landmark model.
+# 0.1 = only covers the palm (fingers get clipped → keypoints stuck at y=0)
+# 0.5 = covers the full open hand including all fingertips
+PADDING              = 0.2
 CONFIDENCE_THRESHOLD = 0.5
 
 # ── MediaPipe 21-landmark skeleton connections ────────────────────────────────

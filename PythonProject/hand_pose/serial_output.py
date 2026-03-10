@@ -1,0 +1,2 @@
+class ArduinoSerial:
+    pass
