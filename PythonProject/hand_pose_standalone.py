@@ -277,7 +277,7 @@ class ArduinoSerial:
                 pass
             # Throttle PC -> Arduino updates: give Arduino 40ms to process and avoid overrun
             time.sleep(0.04)
-        except serial.SerialException as e:
+        except Exception as e:
             print(f"[Arduino] Write error: {e}")
 
     def close(self):
