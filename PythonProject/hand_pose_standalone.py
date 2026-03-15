@@ -34,6 +34,8 @@ import numpy as np
 import depthai as dai
 from depthai_nodes import ImgDetectionsExtended, ImgDetectionExtended
 from depthai_nodes.node import ParsingNeuralNetwork
+import time
+import warnings
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CONSTANTS
@@ -260,13 +262,21 @@ class ArduinoSerial:
         if port is None:
             raise RuntimeError("No Arduino found. Use --port COM<X> to specify one.")
         self._ser = serial.Serial(port, baud, timeout=1)
+        # Give the Arduino time to reset after opening the serial port (DTR toggles and reboots it).
+        # This prevents the PC from flooding the Arduino while it boots the sketch.
+        time.sleep(2)
         print(f"[Arduino] Connected on {port} @ {baud} baud")
 
     def send(self, roll: int, pitch: int, throttle: int, yaw: int) -> None:
-        import serial
         r, p, t, y = [max(1000, min(2000, v)) for v in (roll, pitch, throttle, yaw)]
         try:
             self._ser.write(f"R:{r} P:{p} T:{t} Y:{y}\n".encode())
+            try:
+                self._ser.flush()
+            except Exception:
+                pass
+            # Throttle PC -> Arduino updates: give Arduino 40ms to process and avoid overrun
+            time.sleep(0.04)
         except serial.SerialException as e:
             print(f"[Arduino] Write error: {e}")
 
@@ -433,8 +443,12 @@ def main():
     cam_out = cam.requestOutput((768, 768), frame_type, fps=fps)
 
     # Stereo depth — mono left/right -> StereoDepth -> SpatialLocationCalculator
-    mono_left  = pipeline.create(dai.node.MonoCamera)
-    mono_right = pipeline.create(dai.node.MonoCamera)
+    # Suppress the MonoCamera deprecation warning locally.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        mono_left  = pipeline.create(dai.node.MonoCamera)
+        mono_right = pipeline.create(dai.node.MonoCamera)
+
     mono_left.setBoardSocket(dai.CameraBoardSocket.CAM_B)
     mono_right.setBoardSocket(dai.CameraBoardSocket.CAM_C)
     mono_left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
@@ -604,7 +618,7 @@ def main():
                     for old in sorted(buf.keys())[:-15]:
                         buf.pop(old, None)
 
-            # ── Flight control + draw + display ───────────────────────────────
+            # ── Flight control + draw + display ─────────────────-----------
             if in_video is not None:
                 frame = in_video.getCvFrame()
                 roll, pitch, throttle, yaw = 1500, 1500, 1000, 1500
@@ -621,8 +635,9 @@ def main():
                     roll, pitch, throttle, yaw = flight_ctrl.process_hand(
                         gesture, kpts, last_depth_mm)
 
-                    if arduino is not None:
-                        arduino.send(roll, pitch, throttle, yaw)
+                # Always send current command values to Arduino when available
+                if arduino is not None:
+                    arduino.send(roll, pitch, throttle, yaw)
 
                 for hand in last_hands:
                     draw_hand(frame, hand["keypoints"], label=hand["label"])
@@ -672,4 +687,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

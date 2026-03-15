@@ -1,4 +1,5 @@
 from typing import Optional
+import time
 
 
 class ArduinoSerial:
@@ -44,6 +45,9 @@ class ArduinoSerial:
                 self._ser.inter_byte_timeout = 0.01
             except Exception:
                 pass
+            # Give the Arduino time to reset after opening the serial port (DTR toggles and reboots it).
+            # This prevents the PC from flooding the Arduino while it boots the sketch.
+            time.sleep(2)
             print(f"[Arduino] Connected on {chosen} @ {baud} baud")
         except Exception as e:
             raise RuntimeError(f"Failed to open serial port {chosen}: {e}") from e
@@ -56,6 +60,8 @@ class ArduinoSerial:
                 self._ser.flush()
             except Exception:
                 pass
+            # Throttle PC -> Arduino updates: give Arduino 40ms to process and avoid overrun
+            time.sleep(0.04)
         except Exception as e:
             print(f"[Arduino] Write error: {e}")
 

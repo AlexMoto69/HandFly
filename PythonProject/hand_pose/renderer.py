@@ -210,8 +210,9 @@ def run_display_loop(pipeline: dai.Pipeline,
                 roll, pitch, throttle, yaw = flight_ctrl.process_hand(
                     gesture, kpts, last_depth_mm)
 
-                if arduino is not None:
-                    arduino.send(roll, pitch, throttle, yaw)
+            # Always send current command values to Arduino when available
+            if arduino is not None:
+                arduino.send(roll, pitch, throttle, yaw)
 
             for hand in last_hands:
                 draw_hand(frame, hand["keypoints"], label=hand["label"])
@@ -254,4 +255,3 @@ def run_display_loop(pipeline: dai.Pipeline,
             flight_ctrl.recalibrate_yaw()
 
     cv2.destroyAllWindows()
-
