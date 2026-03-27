@@ -24,6 +24,7 @@ import depthai as dai
 import time
 import sys
 import warnings
+import math
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CONSTANTS
@@ -52,24 +53,51 @@ COLOR_TEXT = (255, 255, 255)
 # GESTURE RECOGNITION
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _dist(a, b):
-    return np.linalg.norm(a - b)
-
-def _angle(a, b, c):
-    ba, bc = a - b, c - b
-    cos = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
-    return np.degrees(np.arccos(np.clip(cos, -1.0, 1.0)))
-
 def recognize_gesture(kpts: List[Tuple[float, float]]) -> Optional[str]:
-    kpts = np.array(kpts)
+    # Rotation-invariant gesture recognition: rotate points so that the middle-finger base
+    # (landmark 9) points upwards relative to the wrist (landmark 0). This makes the
+    # 'finger up/down' tests robust to camera rotation.
+    try:
+        pts = np.array(kpts, dtype=float)
+        p0 = pts[0]
+        p9 = pts[9]
+        vec = p9 - p0
+        if np.linalg.norm(vec) < 1e-6:
+            rotated = pts
+        else:
+            angle = math.atan2(vec[1], vec[0])
+            # rotate so the vector points to negative y (image up): desired angle = -pi/2
+            theta = -math.pi/2 - angle
+            c, s = math.cos(theta), math.sin(theta)
+            R = np.array([[c, -s], [s, c]])
+            centered = pts - p0
+            rotated = (R @ centered.T).T
+    except Exception:
+        rotated = np.array(kpts, dtype=float)
+
+    kpts = rotated
+
+    def _dist(a, b):
+        return np.linalg.norm(a - b)
+
+    def _angle(a, b, c):
+        ba, bc = a - b, c - b
+        denom = (np.linalg.norm(ba) * np.linalg.norm(bc))
+        if denom == 0:
+            return 0.0
+        cos = np.dot(ba, bc) / denom
+        return np.degrees(np.arccos(np.clip(cos, -1.0, 1.0)))
+
     d_3_5 = _dist(kpts[3], kpts[5])
     d_2_3 = _dist(kpts[2], kpts[3])
     a0 = _angle(kpts[0], kpts[1], kpts[2])
     a1 = _angle(kpts[1], kpts[2], kpts[3])
     a2 = _angle(kpts[2], kpts[3], kpts[4])
-    thumb = 1 if (a0 + a1 + a2 > 460 and d_3_5 / d_2_3 > 1.2) else 0
+    thumb = 1 if (a0 + a1 + a2 > 460 and d_3_5 / max(d_2_3, 1e-6) > 1.2) else 0
 
     def finger(tip, mid, base):
+        # After rotation, 'up' corresponds to more negative y in centered coords so
+        # we test if the tip is above the mid which is above the base.
         if kpts[tip][1] < kpts[mid][1] < kpts[base][1]:
             return 1
         if kpts[base][1] < kpts[tip][1]:
@@ -248,6 +276,7 @@ def main():
     print("START", flush=True)
     parser = argparse.ArgumentParser()
     parser.add_argument("-p", "--port", default=None, help="Arduino serial port e.g. COM3")
+    parser.add_argument("--gesture-hold", type=int, default=3, help="Number of consistent frames to confirm a gesture")
     args = parser.parse_args()
     print(f"args: {args}", flush=True)
 
@@ -355,7 +384,7 @@ def main():
     # Enable laser projector for more accurate stereo depth
     # Intensity is in range [0.0, 1.0] (percentage, not 0-800)
     try:
-        device.setIrLaserDotProjectorIntensity(0.8)  # 80% intensity
+        device.setIrLaserDotProjectorIntensity(0.4)  # 40% intensity
         device.setIrFloodLightIntensity(0.0)  # Disable flood light (optional - cleaner depth)
         print("Laser Dot Projector ENABLED at 80% intensity for accurate depth.", flush=True)
     except Exception as e:
@@ -364,6 +393,12 @@ def main():
     print("Running — FIVE=fly  FIST/PEACE=stop  'q'=quit  'r'=recalibrate yaw", flush=True)
 
     last_depth_mm = float((THROTTLE_NEAR_MM + THROTTLE_FAR_MM) / 2)
+
+    # Gesture debouncing: require N consistent frames before we commit a gesture
+    GESTURE_HOLD_FRAMES = args.gesture_hold
+    _temp_gesture = None
+    _temp_count = 0
+    _reported_gesture = None
 
     try:
         frame_count = 0
@@ -408,9 +443,25 @@ def main():
                     if len(valid_depths) > 0:
                         last_depth_mm = float(np.median(valid_depths))
 
-                # Process flight commands
-                gesture = recognize_gesture(kpts)
-                roll, pitch, throttle, yaw = flight_ctrl.process_hand(gesture, kpts, last_depth_mm)
+                # Gesture detection + debouncing
+                current_gesture = recognize_gesture(kpts) or "UNKNOWN"
+
+                # debounce logic: require GESTURE_HOLD_FRAMES identical frames to commit
+                if current_gesture == _temp_gesture:
+                    _temp_count += 1
+                else:
+                    _temp_gesture = current_gesture
+                    _temp_count = 1
+
+                if _temp_count >= GESTURE_HOLD_FRAMES:
+                    if _reported_gesture != _temp_gesture:
+                        _reported_gesture = _temp_gesture
+                        # small debug print when gesture changes
+                        print(f"[Gesture] Reported -> {_reported_gesture}")
+
+                gesture_to_use = _reported_gesture if _reported_gesture is not None else current_gesture
+
+                roll, pitch, throttle, yaw = flight_ctrl.process_hand(gesture_to_use, kpts, last_depth_mm)
 
                 # Draw hand skeleton with bones AND joints (ONLY when hand detected)
                 for (i, j) in HAND_CONNECTIONS:
@@ -426,6 +477,11 @@ def main():
                     x = int(landmark.x * w)
                     y = int(landmark.y * h)
                     cv2.circle(frame, (x, y), 3, COLOR_JOINT, -1)
+
+                # big HUD at top center (only one gesture label)
+                hud = gesture_to_use if gesture_to_use else current_gesture
+                cv2.putText(frame, hud, (max(10, w//2 - 80), 40), cv2.FONT_HERSHEY_DUPLEX,
+                            1.0, (0, 220, 220), 2, cv2.LINE_AA)
 
             # Send to Arduino every frame (flight control is real-time)
             if arduino:
