@@ -119,43 +119,63 @@ def main():
     mono_right.setFps(fps)
 
     stereo = pipeline.create(dai.node.StereoDepth)
+    # 1. Use FAST_DENSITY for highest fill-rate (less holes in depth map)
     stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.FAST_DENSITY)
     stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)
     stereo.setOutputSize(mono_left.getResolutionWidth(), mono_left.getResolutionHeight())
-    stereo.setSubpixel(False)
+
+    # 2. CRITICAL: Enable Subpixel for smooth, continuous Z values
+    stereo.setSubpixel(True)
+
+    # 3. Extended disparity helps track hand when very close to lens
     stereo.setExtendedDisparity(True)
     stereo.setLeftRightCheck(True)
 
-    # Add spatial and temporal filtering for cleaner depth
-    stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_DETAIL)
-    stereo.setDepthLowerThreshold(100)      # Minimum depth (mm)
-    stereo.setDepthUpperThreshold(5000)     # Maximum depth (mm)
+    # 4. Correctly apply hardware post-processing filters via initialConfig
+    # Spatial filter: Fills holes and smooths depth map horizontally/vertically
+    stereo.initialConfig.postProcessing.spatialFilter.enable = True
+    stereo.initialConfig.postProcessing.spatialFilter.holeFillingRadius = 2
+    stereo.initialConfig.postProcessing.spatialFilter.numIterations = 1
 
-    # Spatial filter: reduces noise in the depth map
-    spatial = stereo.initializedFilters()
-    spatial.addFilter(dai.node.SpatialFilter())
+    # Temporal filter: Smooths Z-axis over time so the drone doesn't twitch
+    stereo.initialConfig.postProcessing.temporalFilter.enable = True
 
-    # Temporal filter: smooths depth across frames
-    temporal = stereo.initializedFilters()
-    temporal.addFilter(dai.node.TemporalFilter())
+    # Threshold filter: Only keep depth in valid range
+    stereo.initialConfig.postProcessing.thresholdFilter.minRange = 100
+    stereo.initialConfig.postProcessing.thresholdFilter.maxRange = 5000
+
+    # Add SpatialLocationCalculator for accurate 3D depth sampling (like DotP_test.py)
+    spatialLocationCalculator = pipeline.create(dai.node.SpatialLocationCalculator)
+
+    # Configure ROI for wrist area (will sample depth at hand landmarks)
+    spatialConfig = dai.SpatialLocationCalculatorConfigData()
+    spatialConfig.depthThresholds.lowerThreshold = 100
+    spatialConfig.depthThresholds.upperThreshold = 5000
+    spatialConfig.roi = dai.Rect(dai.Point2f(0.4, 0.4), dai.Point2f(0.6, 0.6))
+    spatialConfig.calculationAlgorithm = dai.SpatialLocationCalculatorAlgorithm.MEDIAN
+
+    spatialLocationCalculator.inputConfig.setWaitForMessage(False)
+    spatialLocationCalculator.initialConfig.addROI(spatialConfig)
 
     mono_left.out.link(stereo.left)
     mono_right.out.link(stereo.right)
+    stereo.depth.link(spatialLocationCalculator.inputDepth)
 
     # Create queues
     print("Creating queues...", flush=True)
     q_video = cam_out.createOutputQueue(maxSize=1, blocking=False)
     q_depth = stereo.depth.createOutputQueue(maxSize=1, blocking=False)
+    q_spatial = spatialLocationCalculator.out.createOutputQueue(maxSize=1, blocking=False)
     print("Queues created, starting pipeline...", flush=True)
 
     pipeline.start()
     print("Pipeline started", flush=True)
 
-    # Enable laser projector for more accurate stereo depth
+    # Enable laser projector for MORE ACCURATE stereo depth (exactly like DotP_test.py)
     try:
-        device.setIrLaserDotProjectorIntensity(0.4)
+        device.setIrLaserDotProjectorIntensity(0.4)  # 40% intensity
         device.setIrFloodLightIntensity(0.0)
-        print("Laser Dot Projector ENABLED at 40% intensity for accurate depth.", flush=True)
+        print("✓ Active Stereo ENABLED (Laser Dot Projector + SpatialLocationCalculator)", flush=True)
     except Exception as e:
         print(f"Laser Dot Projector not available on this device: {e}", flush=True)
 
@@ -186,6 +206,14 @@ def main():
             if in_depth is not None:
                 depth_frame = in_depth.getFrame()
 
+            # NON-BLOCKING spatial data - for more accurate depth sampling
+            in_spatial = q_spatial.tryGet()
+            spatial_data = None
+            if in_spatial is not None:
+                spatial_locations = in_spatial.getSpatialLocations()
+                if len(spatial_locations) > 0:
+                    spatial_data = spatial_locations[0]
+
             frame = in_video.getCvFrame()
             h, w = frame.shape[:2]
 
@@ -207,14 +235,23 @@ def main():
 
                 # Get depth from wrist (landmark 0) - ONLY if depth is available
                 if depth_frame is not None:
-                    px_x = int(np.clip(kpts[0][0] * w, 0, w - 1))
-                    px_y = int(np.clip(kpts[0][1] * h, 0, h - 1))
+                    # PRIORITY 1: Use SpatialLocationCalculator data (most accurate from DotP_test.py)
+                    if spatial_data is not None:
+                        try:
+                            last_depth_mm = float(spatial_data.spatialCoordinates.z)
+                        except:
+                            pass  # Fallback to next method
 
-                    # OPTIMIZED: 4x4 ROI for fastest median calculation
-                    roi = depth_frame[max(0, px_y - 2):min(h, px_y + 2), max(0, px_x - 2):min(w, px_x + 2)]
-                    valid_depths = roi[roi > 0]
-                    if len(valid_depths) > 0:
-                        last_depth_mm = float(np.median(valid_depths))
+                    # FALLBACK: Sample depth directly at wrist location
+                    if spatial_data is None:
+                        px_x = int(np.clip(kpts[0][0] * w, 0, w - 1))
+                        px_y = int(np.clip(kpts[0][1] * h, 0, h - 1))
+
+                        # OPTIMIZED: 4x4 ROI for fastest median calculation
+                        roi = depth_frame[max(0, px_y - 2):min(h, px_y + 2), max(0, px_x - 2):min(w, px_x + 2)]
+                        valid_depths = roi[roi > 0]
+                        if len(valid_depths) > 0:
+                            last_depth_mm = float(np.median(valid_depths))
 
                 # Gesture detection + debouncing
                 current_gesture = recognize_gesture(kpts) or "UNKNOWN"

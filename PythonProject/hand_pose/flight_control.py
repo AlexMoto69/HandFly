@@ -55,6 +55,10 @@ class DroneGestureController:
         self.anchor_y_mm = None      # Landmark 9 Y in millimeters
         self.anchor_z_mm = None      # Landmark 9 Z (depth) in millimeters
 
+        # Depth history buffer - keep last 3 valid depth readings for smoothing
+        self.depth_history = []
+        self.depth_history_size = 3
+
     def _dz(self, value: int, center: int = 1500) -> int:
         """Apply deadzone: force to center if within ±deadzone"""
         return center if abs(value - center) < self.deadzone else value
@@ -78,19 +82,39 @@ class DroneGestureController:
             return 0.0
         return delta_mm
 
+    def _smooth_depth(self, z_mm: float) -> float:
+        """
+        Smooth depth by averaging with history buffer.
+
+        Args:
+            z_mm: current depth reading in mm
+
+        Returns:
+            smoothed depth (average of last N readings)
+        """
+        self.depth_history.append(z_mm)
+        if len(self.depth_history) > self.depth_history_size:
+            self.depth_history.pop(0)
+
+        return float(np.mean(self.depth_history))
+
     def _get_landmark_9_3d(self, keypoints_norm, depth_frame, frame_shape):
         """
         Extract Landmark 9 (middle finger knuckle) 3D position from OAK-D.
 
         Args:
             keypoints_norm: 21 normalized (x, y) landmarks
-            depth_frame: OAK-D depth frame (numpy array in mm)
+            depth_frame: OAK-D depth frame (numpy array in mm) or None
             frame_shape: (H, W, C)
 
         Returns:
             (x_mm, y_mm, z_mm) or (None, None, None) if depth not available
         """
         try:
+            # Check if depth_frame is valid FIRST
+            if depth_frame is None:
+                return None, None, None
+
             h, w = frame_shape[:2]
 
             # Landmark 9 normalized position
@@ -101,22 +125,34 @@ class DroneGestureController:
             px_x = int(np.clip(lm9_x_norm * w, 0, w - 1))
             px_y = int(np.clip(lm9_y_norm * h, 0, h - 1))
 
-            # Get depth at this location - LARGER ROI (10x10 instead of 4x4) for better filtering
-            roi_half = 5
+            # Get depth at this location - VERY LARGE ROI (20x20) for aggressive filtering
+            roi_half = 10
             roi = depth_frame[max(0, px_y - roi_half):min(h, px_y + roi_half),
                              max(0, px_x - roi_half):min(w, px_x + roi_half)]
             valid_depths = roi[roi > 0]
 
-            if len(valid_depths) == 0:
+            if len(valid_depths) < 10:  # Need at least 10 valid samples
                 return None, None, None
 
-            # Better depth filtering: use median to reject outliers
+            # Aggressive filtering: use median + percentile filtering
             z_mm = float(np.median(valid_depths))
+
+            # Additional check: reject if depth varies too much (outlier frame)
+            q25 = float(np.percentile(valid_depths, 25))
+            q75 = float(np.percentile(valid_depths, 75))
+            iqr = q75 - q25
+
+            # If median is too far from the middle quartile, it's probably noise
+            if z_mm < q25 - iqr or z_mm > q75 + iqr:
+                return None, None, None
 
             # Additional check: reject depth if it seems unreasonable
             # Valid hand depth range: 200mm (very close) to 2000mm (very far)
             if z_mm < 200 or z_mm > 2000:
                 return None, None, None
+
+            # Apply depth smoothing buffer (average last 3 readings)
+            z_mm = self._smooth_depth(z_mm)
 
             # OAK-D intrinsics (approximate for 1280x720)
             # Note: For best accuracy, calibrate your specific camera!
@@ -212,18 +248,22 @@ class DroneGestureController:
                 return (self.smooth_roll, self.smooth_pitch, self.smooth_throttle, self.smooth_yaw)
 
         # Check if gesture changed - if so, save new anchor
+        # SPECIAL: When switching gestures, RESET Z-AXIS (depth) to recalibrate
         if gesture != self.current_gesture:
+            # Always update X and Y to current position
             self.anchor_x_mm = curr_x_mm
             self.anchor_y_mm = curr_y_mm
+            # RESET Z-AXIS when gesture changes - critical for accurate throttle
             self.anchor_z_mm = curr_z_mm
             self.current_gesture = gesture
-            print(f"[FlightCtrl] Anchor set for '{gesture}': X={curr_x_mm:.0f}mm Y={curr_y_mm:.0f}mm Z={curr_z_mm:.0f}mm")
+            print(f"[FlightCtrl] Gesture changed to '{gesture}' - Z-axis RESET: X={curr_x_mm:.0f}mm Y={curr_y_mm:.0f}mm Z={curr_z_mm:.0f}mm")
 
         # Ensure anchor is set (safety check)
         if self.anchor_x_mm is None or self.anchor_y_mm is None or self.anchor_z_mm is None:
             self.anchor_x_mm = curr_x_mm
             self.anchor_y_mm = curr_y_mm
             self.anchor_z_mm = curr_z_mm
+            self.current_gesture = gesture
             print(f"[FlightCtrl] Anchor initialized for '{gesture}': X={curr_x_mm:.0f}mm Y={curr_y_mm:.0f}mm Z={curr_z_mm:.0f}mm")
 
         # Calculate deltas (movement from anchor)

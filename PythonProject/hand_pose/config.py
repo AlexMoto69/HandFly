@@ -27,21 +27,21 @@ YAW_ANGLE_MAX = 15.0
 # State 2: THUMBS UP / OK - Full 3D Control
 # These are MUCH larger now because deltas in mm are huge (100-300mm)
 THUMBS_UP_THROTTLE_SCALE = 2.0    # 100mm up/down = ±200 PWM (was 0.5, too small!)
-THUMBS_UP_PITCH_SCALE = 2.5       # 100mm push/pull = ±250 PWM (increased for responsiveness)
+THUMBS_UP_PITCH_SCALE = 1.0       # 100mm push/pull = ±100 PWM (reduced to prevent noise)
 THUMBS_UP_ROLL_SCALE = 2.0        # 100mm left/right = ±200 PWM
 
 # State 3: FOUR/FIVE - Cruise Mode (Altitude Hold)
-CRUISE_PITCH_SCALE = 2.0          # 100mm depth = ±200 PWM (increased for responsiveness)
+CRUISE_PITCH_SCALE = 1.0          # 100mm depth = ±100 PWM (reduced to prevent noise)
 CRUISE_ROLL_SCALE = 2.0           # 100mm horizontal = ±200 PWM
 
 # State 4: PEACE - Yaw Rotation Only
-PEACE_YAW_SCALE = 3.0             # 100mm left/right = ±300 PWM (more sensitive for yaw)
+PEACE_YAW_SCALE = 3.0             # 100mm left/right = ±300 PWM
 
 # ── DEADZONE (mm) - Ignore small movements to prevent jitter from hand shake ─
 # If delta is smaller than this, treat as 0 (snap to center)
 DEADZONE_X_MM = 15.0              # Left/Right shake deadzone (mm)
 DEADZONE_Y_MM = 15.0              # Up/Down shake deadzone (mm)
-DEADZONE_Z_MM = 20.0              # Depth shake deadzone (mm) - larger because depth is noisier
+DEADZONE_Z_MM = 40.0              # Depth shake deadzone (mm) - VERY LARGE because depth noise is huge!
 
 # ── MediaPipe 21-landmark skeleton connections ────────────────────────────────
 HAND_CONNECTIONS = [
