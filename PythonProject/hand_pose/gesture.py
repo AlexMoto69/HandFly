@@ -51,22 +51,34 @@ def recognize_gesture(kpts: List[Tuple[float, float]]) -> Optional[str]:
     pts = np.array(kpts)
 
     # ── Thumb ─────────────────────────────────────────────────────────────────
+    # Check if thumb is extended (for OK and other gestures with thumb up)
     d_3_5 = _dist(pts[3], pts[5])
     d_2_3 = _dist(pts[2], pts[3])
     a0    = _angle(pts[0], pts[1], pts[2])
     a1    = _angle(pts[1], pts[2], pts[3])
     a2    = _angle(pts[2], pts[3], pts[4])
-    thumb = 1 if (a0 + a1 + a2 > 460 and d_3_5 / d_2_3 > 1.2) else 0
+
+    # Thumb is up if angles sum > 450 AND distance ratio > 1.0 (relaxed from 1.2)
+    thumb = 1 if (a0 + a1 + a2 > 450 and d_3_5 / max(d_2_3, 1e-6) > 1.0) else 0
 
     # ── Four fingers ──────────────────────────────────────────────────────────
+    # More stable finger detection with bias toward "extended" if near threshold
     index  = _finger_state(pts,  8,  7,  6)
     middle = _finger_state(pts, 12, 11, 10)
     ring   = _finger_state(pts, 16, 15, 14)
     little = _finger_state(pts, 20, 19, 18)
 
+    # Convert -1 (ambiguous) to 0 (curled) for matching, but be more lenient
+    # If finger is ambiguous, lean toward "curled" for cleaner OK detection
+    index = 0 if index <= 0 else 1
+    middle = 0 if middle <= 0 else 1
+    ring = 0 if ring <= 0 else 1
+    little = 0 if little <= 0 else 1
+
     combo = (thumb, index, middle, ring, little)
 
-    return {
+    # Try exact match first
+    exact_match = {
         (1, 1, 1, 1, 1): "FIVE",
         (0, 0, 0, 0, 0): "FIST",
         (1, 0, 0, 0, 0): "OK",
@@ -76,4 +88,25 @@ def recognize_gesture(kpts: List[Tuple[float, float]]) -> Optional[str]:
         (1, 1, 1, 0, 0): "THREE",
         (0, 1, 1, 1, 1): "FOUR",
     }.get(combo)
+
+    if exact_match:
+        return exact_match
+
+    # Fallback: Try fuzzy matching for robustness
+    num_extended = sum(combo[1:])  # Count non-thumb extended fingers
+
+    if combo[0] == 0 and num_extended >= 4:  # Thumb down, 4+ fingers up
+        return "FIVE"
+    elif combo[0] == 0 and num_extended == 0:  # All down
+        return "FIST"
+    elif combo[0] == 1 and num_extended == 0:  # Thumb up, all others down
+        return "OK"
+    elif combo[0] == 0 and num_extended == 1:  # One finger up, others down
+        return "ONE"
+    elif combo[0] == 1 and num_extended == 1 and combo[1] == 1:  # Thumb + index
+        return "TWO"
+    elif combo[0] == 0 and num_extended == 2:  # Two fingers up
+        return "PEACE" if combo[1] == 1 and combo[2] == 1 else None
+
+    return None
 

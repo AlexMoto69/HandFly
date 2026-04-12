@@ -1,177 +1,310 @@
 """
 flight_control.py
 -----------------
-Translates hand keypoints + stereo depth into drone PPM commands.
+Spatial Anchor Flight Controller for Hand Gesture Drone Control.
 
-PPM range:
-    1000 = min   (full left / full back / zero throttle / full yaw left)
-    1500 = center (neutral)
-    2000 = max   (full right / full forward / full throttle / full yaw right)
-
-Control matrix:
-    Roll     <- kp[9] X in frame          (hand left / right)
-    Pitch    <- kp[9] Y in frame          (hand up / down)
-    Throttle <- stereo Z depth in mm      (hand closer = climb, further = descend)
-                Uses OAK-D Pro stereo -- rotation-invariant, true metric depth.
-    Yaw      <- angle of kp[5]->kp[17]   (wrist twist clockwise / anti-clockwise)
-                kp5 = index MCP,  kp17 = pinky MCP
+Uses Landmark 9 (middle finger knuckle) 3D position from OAK-D stereo depth.
+Saves anchor when gesture detected, then maps movement deltas to PWM outputs.
 
 Gestures:
-    FIVE  -> all four axes live
-    FIST  -> emergency stop (all neutral, throttle cut)
-    PEACE -> emergency stop (same)
-    other -> safe hold (throttle cut)
+    ONE        -> Failsafe / Brake (hover, clear anchor)
+    THUMBS_UP  -> Takeoff & Drift (full 3D: throttle=Y, pitch=Z, roll=X)
+    FOUR/FIVE  -> Cruise Mode (altitude hold: pitch=Z, roll=X)
+    PEACE      -> Yaw Rotation (yaw=X only)
+    FIST       -> Land (auto-level descent, clear anchor)
 """
 import numpy as np
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
-from .config import THROTTLE_NEAR_MM, THROTTLE_FAR_MM, YAW_ANGLE_MAX
-
-
-def knuckle_yaw_angle(keypoints: List[Tuple[float, float]]) -> float:
-    """
-    Computes the wrist ROLL angle — how much the hand is twisted left/right.
-
-    Method:
-      1. Build the hand's natural "up" vector: kp0 (wrist) → kp9 (middle MCP)
-      2. Build the knuckle "horizontal" vector: kp5 (index MCP) → kp17 (pinky MCP)
-      3. The signed angle between them, minus 90°, gives the roll deviation
-         from a flat neutral position.
-
-    Returns degrees:
-        ~  0°  = hand flat and level (neutral yaw)
-        + 30°  = wrist rolled clockwise  → yaw right
-        - 30°  = wrist rolled anti-clock → yaw left
-
-    This is position-invariant — moving the hand up/down/left/right on screen
-    doesn't change the output, only a true wrist twist does.
-    """
-    p0  = np.array(keypoints[0])   # wrist
-    p9  = np.array(keypoints[9])   # middle MCP
-    p5  = np.array(keypoints[5])   # index MCP
-    p17 = np.array(keypoints[17])  # pinky MCP
-
-    # Hand's natural up-vector (wrist → middle knuckle)
-    up_vec      = p9 - p0
-    up_angle    = np.degrees(np.arctan2(up_vec[1], up_vec[0]))
-
-    # Knuckle bar vector (index → pinky knuckle)
-    knuckle_vec = p17 - p5
-    knuckle_angle = np.degrees(np.arctan2(knuckle_vec[1], knuckle_vec[0]))
-
-    # Roll = how far the knuckle bar deviates from being perpendicular to up-vec
-    # If the hand is flat: knuckle_angle ≈ up_angle - 90°
-    # Roll deviation = knuckle_angle - (up_angle - 90°) = knuckle_angle - up_angle + 90°
-    roll = knuckle_angle - up_angle + 90.0
-
-    # Normalise to [-180, 180]
-    roll = (roll + 180.0) % 360.0 - 180.0
-    return float(roll)
+from .config import (
+    THUMBS_UP_THROTTLE_SCALE, THUMBS_UP_PITCH_SCALE, THUMBS_UP_ROLL_SCALE,
+    CRUISE_PITCH_SCALE, CRUISE_ROLL_SCALE,
+    PEACE_YAW_SCALE
+)
 
 
 class DroneGestureController:
-    def __init__(self, smoothing: float = 0.2, deadzone: int = 40,
-                 calibration_frames: int = 30):
-        """
-        smoothing           : EMA alpha 0.0 (smooth/laggy) to 1.0 (raw/instant)
-        deadzone            : PPM units around center snapped to center
-        calibration_frames  : number of FIVE-gesture frames to average for
-                              yaw neutral calibration on first use
-        """
-        self.alpha    = smoothing
-        self.deadzone = deadzone
-        self.smooth_roll     = 1500
-        self.smooth_pitch    = 1500
-        self.smooth_throttle = 1000
-        self.smooth_yaw      = 1500
-        self.cam_min = 0.25
-        self.cam_max = 0.75
+    """
+    Spatial Anchor Flight Controller.
 
-        # Yaw auto-calibration — first N frames with FIVE gesture
-        # are averaged to find the user's natural neutral angle
-        self._cal_frames   = calibration_frames
-        self._cal_samples  = []
-        self._yaw_neutral  = None   # set after calibration
+    Core Logic:
+      - Landmark 9 (middle finger knuckle) is saved as a 3D anchor when gesture detected
+      - For every frame, calculate Delta = Current - Anchor in real 3D space (mm)
+      - Map deltas to PWM outputs using configurable scale factors
+      - Save new anchor whenever gesture changes
+      - ONE gesture clears anchor immediately (hover mode)
+    """
+
+    def __init__(self, smoothing: float = 0.15, deadzone: int = 40):
+        """
+        smoothing: EMA alpha (0.0=smooth/laggy, 1.0=raw/instant)
+        deadzone: PWM units around 1500 to snap to center
+        """
+        self.alpha = smoothing
+        self.deadzone = deadzone
+
+        # Smoothed outputs
+        self.smooth_roll = 1500
+        self.smooth_pitch = 1500
+        self.smooth_throttle = 1500
+        self.smooth_yaw = 1500
+
+        # Spatial Anchor System
+        self.current_gesture = None
+        self.anchor_x_mm = None      # Landmark 9 X in millimeters
+        self.anchor_y_mm = None      # Landmark 9 Y in millimeters
+        self.anchor_z_mm = None      # Landmark 9 Z (depth) in millimeters
 
     def _dz(self, value: int, center: int = 1500) -> int:
+        """Apply deadzone: force to center if within ±deadzone"""
         return center if abs(value - center) < self.deadzone else value
 
     def _ema(self, raw: int, prev: int) -> int:
+        """Exponential Moving Average filter"""
         return int(self.alpha * raw + (1.0 - self.alpha) * prev)
 
-    def recalibrate_yaw(self) -> None:
-        """Force a new yaw calibration on the next FIVE gesture frames."""
-        self._cal_samples = []
-        self._yaw_neutral = None
-        print("[DroneGestureController] Yaw recalibration started — hold FIVE flat.")
+    def _apply_deadzone(self, delta_mm: float, deadzone_mm: float) -> float:
+        """
+        Apply deadzone: if delta is smaller than threshold, snap to 0.
 
-    def process_hand(self,
-                     gesture: str,
-                     keypoints: List[Tuple[float, float]],
-                     depth_mm: float) -> tuple:
+        Args:
+            delta_mm: movement in millimeters from anchor
+            deadzone_mm: threshold in mm below which to snap to 0
+
+        Returns:
+            0 if |delta| < deadzone, else delta
         """
-        gesture   : from recognize_gesture()
-        keypoints : 21 full-frame normalised (x, y) landmarks
-        depth_mm  : stereo Z of the wrist region in millimetres
-        Returns   : (roll, pitch, throttle, yaw) each int in [1000, 2000]
+        if abs(delta_mm) < deadzone_mm:
+            return 0.0
+        return delta_mm
+
+    def _get_landmark_9_3d(self, keypoints_norm, depth_frame, frame_shape):
         """
-        # EMERGENCY STOP
-        if gesture in ("FIST", "PEACE"):
-            self.smooth_roll = self.smooth_pitch = 1500
-            self.smooth_throttle = 1000
+        Extract Landmark 9 (middle finger knuckle) 3D position from OAK-D.
+
+        Args:
+            keypoints_norm: 21 normalized (x, y) landmarks
+            depth_frame: OAK-D depth frame (numpy array in mm)
+            frame_shape: (H, W, C)
+
+        Returns:
+            (x_mm, y_mm, z_mm) or (None, None, None) if depth not available
+        """
+        try:
+            h, w = frame_shape[:2]
+
+            # Landmark 9 normalized position
+            lm9_x_norm = keypoints_norm[9][0]
+            lm9_y_norm = keypoints_norm[9][1]
+
+            # Convert to pixel coordinates
+            px_x = int(np.clip(lm9_x_norm * w, 0, w - 1))
+            px_y = int(np.clip(lm9_y_norm * h, 0, h - 1))
+
+            # Get depth at this location - LARGER ROI (10x10 instead of 4x4) for better filtering
+            roi_half = 5
+            roi = depth_frame[max(0, px_y - roi_half):min(h, px_y + roi_half),
+                             max(0, px_x - roi_half):min(w, px_x + roi_half)]
+            valid_depths = roi[roi > 0]
+
+            if len(valid_depths) == 0:
+                return None, None, None
+
+            # Better depth filtering: use median to reject outliers
+            z_mm = float(np.median(valid_depths))
+
+            # Additional check: reject depth if it seems unreasonable
+            # Valid hand depth range: 200mm (very close) to 2000mm (very far)
+            if z_mm < 200 or z_mm > 2000:
+                return None, None, None
+
+            # OAK-D intrinsics (approximate for 1280x720)
+            # Note: For best accuracy, calibrate your specific camera!
+            fx = 632.0  # focal length X
+            fy = 632.0  # focal length Y
+            cx = 640.0  # principal point X
+            cy = 360.0  # principal point Y
+
+            # Convert pixel + depth to 3D coordinates in millimeters
+            x_mm = (px_x - cx) * z_mm / fx
+            y_mm = (px_y - cy) * z_mm / fy
+
+            return x_mm, y_mm, z_mm
+
+        except Exception as e:
+            print(f"[FlightCtrl] Error getting Landmark 9 3D: {e}")
+            return None, None, None
+
+    def process_hand(self, gesture: str, keypoints_norm, depth_frame, frame_shape):
+        """
+        Main flight control logic based on spatial anchor deltas.
+
+        Args:
+            gesture: from recognize_gesture() (ONE, OK, TWO, FOUR, FIVE, PEACE, FIST)
+            keypoints_norm: 21 normalized (x, y) landmarks
+            depth_frame: OAK-D depth frame (numpy array in mm)
+            frame_shape: (H, W, C)
+
+        Returns:
+            (roll, pitch, throttle, yaw) each int in [1000, 2000]
+        """
+
+        # Handle None/Unknown gestures - return neutral HOVER (1500 throttle for safety)
+        if gesture is None or gesture == "UNKNOWN":
+            return (1500, 1500, 1500, 1500)
+
+        # STATE 1: ONE (Failsafe / Brake) - Clear anchor immediately
+        if gesture == "ONE":
+            self.anchor_x_mm = None
+            self.anchor_y_mm = None
+            self.anchor_z_mm = None
+            self.current_gesture = "ONE"
+
+            # Neutral hover
+            self.smooth_roll = 1500
+            self.smooth_pitch = 1500
+            self.smooth_throttle = 1500
             self.smooth_yaw = 1500
-            return 1500, 1500, 1000, 1500
 
-        # ACTIVE FLIGHT
-        if gesture == "FIVE":
-            # Roll -- kp[9] X: left(1000) <-> right(2000)
-            raw_roll = self._dz(int(np.interp(
-                keypoints[9][0], [self.cam_min, self.cam_max], [1000, 2000])))
+            return (self.smooth_roll, self.smooth_pitch, self.smooth_throttle, self.smooth_yaw)
 
-            # Pitch -- kp[9] Y: hand high (low Y) = forward(1000), low = back(2000)
-            raw_pitch = self._dz(int(np.interp(
-                keypoints[9][1], [self.cam_min, self.cam_max], [2000, 1000])))
+        # STATE 1B: TWO (Failsafe / Brake) - Also clear anchor immediately (same as ONE)
+        if gesture == "TWO":
+            self.anchor_x_mm = None
+            self.anchor_y_mm = None
+            self.anchor_z_mm = None
+            self.current_gesture = "TWO"
 
-            # Throttle -- real stereo Z in mm: close->2000, far->1000
-            raw_throttle = int(np.interp(
-                depth_mm,
-                [THROTTLE_NEAR_MM, THROTTLE_FAR_MM],
-                [2000, 1000]))
+            # Neutral hover
+            self.smooth_roll = 1500
+            self.smooth_pitch = 1500
+            self.smooth_throttle = 1500
+            self.smooth_yaw = 1500
 
-            # Yaw -- relative roll deviation from calibrated neutral
-            raw_angle = knuckle_yaw_angle(keypoints)
+            return (self.smooth_roll, self.smooth_pitch, self.smooth_throttle, self.smooth_yaw)
 
-            # Phase 1: collect calibration samples
-            if self._yaw_neutral is None:
-                self._cal_samples.append(raw_angle)
-                if len(self._cal_samples) >= self._cal_frames:
-                    self._yaw_neutral = float(np.mean(self._cal_samples))
-                    print(f"[DroneGestureController] Yaw neutral calibrated "
-                          f"at {self._yaw_neutral:.1f}°")
-                # During calibration hold yaw at center
-                raw_yaw = 1500
+        # STATE 5: FIST (Land) - Clear anchor
+        if gesture == "FIST":
+            self.anchor_x_mm = None
+            self.anchor_y_mm = None
+            self.anchor_z_mm = None
+            self.current_gesture = "FIST"
+
+            # Auto-level descent
+            self.smooth_roll = 1500
+            self.smooth_pitch = 1500
+            self.smooth_throttle = 1400
+            self.smooth_yaw = 1500
+
+            return (self.smooth_roll, self.smooth_pitch, self.smooth_throttle, self.smooth_yaw)
+
+        # For remaining states, get current 3D position of Landmark 9
+        curr_x_mm, curr_y_mm, curr_z_mm = self._get_landmark_9_3d(keypoints_norm, depth_frame, frame_shape)
+
+        # If depth not available, use last known position (don't return neutral)
+        if curr_x_mm is None or curr_y_mm is None or curr_z_mm is None:
+            # Use last smoothed values instead of returning neutral
+            if gesture == "FIST" or gesture == "PEACE":
+                # These don't need 3D, they're handled above
+                pass
             else:
-                # Phase 2: map deviation from neutral → PPM
-                deviation = raw_angle - self._yaw_neutral
-                # Normalise to [-180, 180] in case of wrap-around
-                deviation = (deviation + 180.0) % 360.0 - 180.0
-                # 2° deadzone — snaps small jitter to dead center
-                if abs(deviation) < 2.0:
-                    deviation = 0.0
-                # Map ±YAW_ANGLE_MAX → 1200–1800 (soft range, not full 1000–2000)
-                raw_yaw = int(np.interp(
-                    deviation,
-                    [-YAW_ANGLE_MAX, YAW_ANGLE_MAX],
-                    [1200, 1800]))
+                # Return last smoothed values for OK/FOUR/FIVE
+                return (self.smooth_roll, self.smooth_pitch, self.smooth_throttle, self.smooth_yaw)
 
-            self.smooth_roll     = self._ema(raw_roll,     self.smooth_roll)
-            self.smooth_pitch    = self._ema(raw_pitch,    self.smooth_pitch)
-            self.smooth_throttle = self._ema(raw_throttle, self.smooth_throttle)
-            self.smooth_yaw      = self._ema(raw_yaw,      self.smooth_yaw)
+        # Check if gesture changed - if so, save new anchor
+        if gesture != self.current_gesture:
+            self.anchor_x_mm = curr_x_mm
+            self.anchor_y_mm = curr_y_mm
+            self.anchor_z_mm = curr_z_mm
+            self.current_gesture = gesture
+            print(f"[FlightCtrl] Anchor set for '{gesture}': X={curr_x_mm:.0f}mm Y={curr_y_mm:.0f}mm Z={curr_z_mm:.0f}mm")
 
-            return (self.smooth_roll, self.smooth_pitch,
-                    self.smooth_throttle, self.smooth_yaw)
+        # Ensure anchor is set (safety check)
+        if self.anchor_x_mm is None or self.anchor_y_mm is None or self.anchor_z_mm is None:
+            self.anchor_x_mm = curr_x_mm
+            self.anchor_y_mm = curr_y_mm
+            self.anchor_z_mm = curr_z_mm
+            print(f"[FlightCtrl] Anchor initialized for '{gesture}': X={curr_x_mm:.0f}mm Y={curr_y_mm:.0f}mm Z={curr_z_mm:.0f}mm")
 
-        # UNRECOGNISED -- safe hold
-        return 1500, 1500, 1000, 1500
+        # Calculate deltas (movement from anchor)
+        delta_x = curr_x_mm - self.anchor_x_mm  # Left/Right
+        delta_y = curr_y_mm - self.anchor_y_mm  # Up/Down (vertical)
+        delta_z = curr_z_mm - self.anchor_z_mm  # Depth (push/pull toward camera)
+
+        # Apply deadzone to eliminate hand shake
+        from .config import DEADZONE_X_MM, DEADZONE_Y_MM, DEADZONE_Z_MM
+        delta_x = self._apply_deadzone(delta_x, DEADZONE_X_MM)
+        delta_y = self._apply_deadzone(delta_y, DEADZONE_Y_MM)
+        delta_z = self._apply_deadzone(delta_z, DEADZONE_Z_MM)
+
+
+        # STATE 2: OK (Takeoff & Drift) - Full 3D control
+        if gesture == "OK":
+            # Throttle: Vertical hand movement (positive Y = UP = climb)
+            # Invert because screen Y goes down as values increase
+            # CLAMPED: Never go below 1500 (can only climb, not descend)
+            raw_throttle = max(1500, int(1500 - delta_y * THUMBS_UP_THROTTLE_SCALE))
+
+            # Pitch: Depth (positive delta_z = away = pitch UP/back)
+            raw_pitch = int(1500 + delta_z * THUMBS_UP_PITCH_SCALE)
+
+            # Roll: Horizontal movement
+            raw_roll = int(1500 + delta_x * THUMBS_UP_ROLL_SCALE)
+
+            # Yaw: Locked
+            raw_yaw = 1500
+
+        # STATE 3: FOUR/FIVE (Cruise Mode) - Altitude hold, pitch/roll control
+        elif gesture in ("FOUR", "FIVE"):
+            # Throttle: Locked
+            raw_throttle = 1500
+
+            # Pitch: Depth (positive delta_z = away = pitch UP/back)
+            raw_pitch = int(1500 + delta_z * CRUISE_PITCH_SCALE)
+
+            # Roll: Horizontal movement
+            raw_roll = int(1500 + delta_x * CRUISE_ROLL_SCALE)
+
+            # Yaw: Locked
+            raw_yaw = 1500
+
+        # STATE 4: PEACE (Yaw Rotation) - Yaw control only
+        elif gesture == "PEACE":
+            # Throttle: Locked
+            raw_throttle = 1500
+
+            # Pitch: Locked
+            raw_pitch = 1500
+
+            # Roll: Locked
+            raw_roll = 1500
+
+            # Yaw: Horizontal movement (delta_x)
+            raw_yaw = int(1500 + delta_x * PEACE_YAW_SCALE)
+
+        else:
+            # Unknown gesture - return neutral
+            print(f"[FlightCtrl] Unknown gesture: '{gesture}'")
+            return (1500, 1500, 1500, 1500)
+
+
+        # Clamp all PWM values to valid range
+        raw_roll = max(1000, min(2000, raw_roll))
+        raw_pitch = max(1000, min(2000, raw_pitch))
+        raw_throttle = max(1000, min(2000, raw_throttle))
+        raw_yaw = max(1000, min(2000, raw_yaw))
+
+        # Apply deadzone
+        raw_roll = self._dz(raw_roll)
+        raw_pitch = self._dz(raw_pitch)
+        raw_throttle = self._dz(raw_throttle)
+        raw_yaw = self._dz(raw_yaw)
+
+        # Apply EMA smoothing
+        self.smooth_roll = self._ema(raw_roll, self.smooth_roll)
+        self.smooth_pitch = self._ema(raw_pitch, self.smooth_pitch)
+        self.smooth_throttle = self._ema(raw_throttle, self.smooth_throttle)
+        self.smooth_yaw = self._ema(raw_yaw, self.smooth_yaw)
+
+        return (self.smooth_roll, self.smooth_pitch, self.smooth_throttle, self.smooth_yaw)
 

@@ -22,7 +22,7 @@ from .config import (
     THROTTLE_NEAR_MM, THROTTLE_FAR_MM,
 )
 from .gesture import recognize_gesture
-from .flight_control import DroneGestureController, knuckle_yaw_angle
+from .flight_control import DroneGestureController
 from .serial_output import ArduinoSerial
 
 

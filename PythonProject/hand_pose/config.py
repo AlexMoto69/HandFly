@@ -20,6 +20,29 @@ THROTTLE_FAR_MM  = 700    # 70 cm
 # ── Yaw angle range (degrees of wrist roll, knuckle vector kp5→kp17) ─────────
 YAW_ANGLE_MAX = 15.0
 
+# ── SPATIAL ANCHOR SCALE FACTORS (Gesture-based Flight Control) ──────────────
+# Landmark 9 (Middle Finger Knuckle) is the spatial anchor in 3D from OAK-D
+# All deltas are in millimeters from the anchor point when gesture detected
+
+# State 2: THUMBS UP / OK - Full 3D Control
+# These are MUCH larger now because deltas in mm are huge (100-300mm)
+THUMBS_UP_THROTTLE_SCALE = 2.0    # 100mm up/down = ±200 PWM (was 0.5, too small!)
+THUMBS_UP_PITCH_SCALE = 2.5       # 100mm push/pull = ±250 PWM (increased for responsiveness)
+THUMBS_UP_ROLL_SCALE = 2.0        # 100mm left/right = ±200 PWM
+
+# State 3: FOUR/FIVE - Cruise Mode (Altitude Hold)
+CRUISE_PITCH_SCALE = 2.0          # 100mm depth = ±200 PWM (increased for responsiveness)
+CRUISE_ROLL_SCALE = 2.0           # 100mm horizontal = ±200 PWM
+
+# State 4: PEACE - Yaw Rotation Only
+PEACE_YAW_SCALE = 3.0             # 100mm left/right = ±300 PWM (more sensitive for yaw)
+
+# ── DEADZONE (mm) - Ignore small movements to prevent jitter from hand shake ─
+# If delta is smaller than this, treat as 0 (snap to center)
+DEADZONE_X_MM = 15.0              # Left/Right shake deadzone (mm)
+DEADZONE_Y_MM = 15.0              # Up/Down shake deadzone (mm)
+DEADZONE_Z_MM = 20.0              # Depth shake deadzone (mm) - larger because depth is noisier
+
 # ── MediaPipe 21-landmark skeleton connections ────────────────────────────────
 HAND_CONNECTIONS = [
     (0, 1), (1, 2), (2, 3), (3, 4),        # thumb
