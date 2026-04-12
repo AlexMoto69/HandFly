@@ -1,0 +1,17 @@
+# HandFly - Hand Gesture Drone Control System
+# Python Dependencies
+
+# Core Computer Vision & ML
+depthai>=3.0.0              # OAK-D Pro SDK for stereo depth camera
+mediapipe>=0.10.0           # Google MediaPipe for hand landmark detection
+opencv-python>=4.9.0        # OpenCV for image processing and rendering
+
+# Numerical Computing
+numpy>=2.4.0                # NumPy for numerical operations
+
+# Serial Communication
+pyserial>=3.5               # PySerial for Arduino communication
+
+# System & Utilities
+Pillow>=10.0.0              # PIL for image handling
+
