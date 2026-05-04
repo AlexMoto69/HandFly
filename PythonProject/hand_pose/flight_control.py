@@ -247,6 +247,12 @@ class DroneGestureController:
                 # Return last smoothed values for OK/FOUR/FIVE
                 return (self.smooth_roll, self.smooth_pitch, self.smooth_throttle, self.smooth_yaw)
 
+        # CRITICAL: After the above check, curr_x_mm should be valid
+        # But add extra safety check in case something unexpected happens
+        if curr_x_mm is None or curr_y_mm is None or curr_z_mm is None:
+            print(f"[FlightCtrl] WARNING: curr_x/y/z is still None for gesture '{gesture}', returning last smoothed values")
+            return (self.smooth_roll, self.smooth_pitch, self.smooth_throttle, self.smooth_yaw)
+
         # Check if gesture changed - if so, save new anchor
         # SPECIAL: When switching gestures, RESET Z-AXIS (depth) to recalibrate
         if gesture != self.current_gesture:
