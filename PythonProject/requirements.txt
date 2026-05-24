@@ -1,17 +1,34 @@
 # HandFly - Hand Gesture Drone Control System
-# Python Dependencies
+# Python Dependencies (tested/pinned versions)
 
-# Core Computer Vision & ML
-depthai>=3.0.0              # OAK-D Pro SDK for stereo depth camera
-mediapipe>=0.10.0           # Google MediaPipe for hand landmark detection
-opencv-python>=4.9.0        # OpenCV for image processing and rendering
+# DepthAI & extensions
+depthai>=3.6.1              # OAK-D Pro SDK (tested with 3.6.1)
+depthai-nodes==0.5.0        # helper nodes for DepthAI pipeline
+
+# Computer vision & ML
+mediapipe>=0.10.0           # MediaPipe hand landmark detection
+opencv-python==4.13.0.92    # OpenCV (GUI-enabled wheel)
+opencv-contrib-python==4.13.0.92
 
 # Numerical Computing
-numpy>=2.4.0                # NumPy for numerical operations
+numpy==2.4.6                # pinned to the tested wheel
 
 # Serial Communication
-pyserial>=3.5               # PySerial for Arduino communication
+pyserial>=3.5               # Arduino serial communication
 
-# System & Utilities
+# Imaging
 Pillow>=10.0.0              # PIL for image handling
 
+# Audio / plotting / serialization (required by MediaPipe extras)
+sounddevice~=0.5
+flatbuffers~=25.12
+matplotlib
+
+# Misc
+absl-py~=2.4
+
+# Notes:
+# - On some systems `depthai-nodes` declares a dependency on opencv-python-headless~=4.10.0.
+#   This repository was tested with GUI-enabled OpenCV (4.13) so `cv2.imshow()` works on
+#   Windows. If you encounter conflicts, create an isolated virtual environment and
+#   adjust the OpenCV package (headless vs GUI) according to your deployment needs.

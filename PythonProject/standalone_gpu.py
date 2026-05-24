@@ -143,13 +143,14 @@ class DroneGestureController:
         self.deadzone = deadzone
         self.smooth_roll = 1500
         self.smooth_pitch = 1500
-        self.smooth_throttle = 1000
+        self.smooth_throttle = 1500
         self.smooth_yaw = 1500
         self.cam_min = 0.25
         self.cam_max = 0.75
         self._cal_frames = calibration_frames
         self._cal_samples = []
         self._yaw_neutral = None
+        self._two_anchor_z = None
 
     def _dz(self, v, center=1500):
         return center if abs(v - center) < self.deadzone else v
@@ -163,42 +164,79 @@ class DroneGestureController:
         print("[FlightCtrl] Yaw recalibration started — hold FIVE flat.")
 
     def process_hand(self, gesture, keypoints, depth_mm):
-        if gesture in ("FIST", "PEACE"):
+        if gesture is None or gesture == "UNKNOWN":
+            self.smooth_roll = self.smooth_pitch = 1500
+            self.smooth_throttle = 1500
+            self.smooth_yaw = 1500
+            return 1500, 1500, 1500, 1500
+
+        if gesture == "ONE":
+            self.smooth_roll = self.smooth_pitch = 1500
+            self.smooth_throttle = 1500
+            self.smooth_yaw = 1500
+            return 1500, 1500, 1500, 1500
+
+        if gesture == "FIST":
             self.smooth_roll = self.smooth_pitch = 1500
             self.smooth_throttle = 1000
             self.smooth_yaw = 1500
             return 1500, 1500, 1000, 1500
 
-        if gesture == "FIVE":
-            raw_roll = self._dz(int(np.interp(
-                keypoints[9][0], [self.cam_min, self.cam_max], [1000, 2000])))
-            raw_pitch = self._dz(int(np.interp(
-                keypoints[9][1], [self.cam_min, self.cam_max], [2000, 1000])))
-            raw_throttle = int(np.interp(
-                depth_mm, [THROTTLE_NEAR_MM, THROTTLE_FAR_MM], [2000, 1000]))
+        if gesture == "OK":
+            # Fixed OK behavior: hold a safe climb throttle.
+            self.smooth_roll = 1500
+            self.smooth_pitch = 1500
+            self.smooth_throttle = 1600
+            self.smooth_yaw = 1500
+            return (self.smooth_roll, self.smooth_pitch, self.smooth_throttle, self.smooth_yaw)
 
-            raw_angle = knuckle_yaw_angle(keypoints)
-            if self._yaw_neutral is None:
-                self._cal_samples.append(raw_angle)
-                if len(self._cal_samples) >= self._cal_frames:
-                    self._yaw_neutral = float(np.mean(self._cal_samples))
-                    print(f"[FlightCtrl] Yaw neutral: {self._yaw_neutral:.1f} deg")
-                raw_yaw = 1500
-            else:
-                deviation = (raw_angle - self._yaw_neutral + 180.0) % 360.0 - 180.0
-                if abs(deviation) < 2.0:
-                    deviation = 0.0
-                raw_yaw = int(np.interp(
-                    deviation, [-YAW_ANGLE_MAX, YAW_ANGLE_MAX], [1200, 1800]))
+        if gesture == "TWO":
+            raw_roll = 1500
+            raw_pitch = 1500
+            if self._two_anchor_z is None:
+                self._two_anchor_z = depth_mm
+            raw_throttle = max(1500, min(2000, int(1500 - (depth_mm - self._two_anchor_z))))
+            raw_yaw = 1500
+
+            # Instant mode: no EMA so throttle changes are immediate.
+            self.smooth_roll = raw_roll
+            self.smooth_pitch = raw_pitch
+            self.smooth_throttle = raw_throttle
+            self.smooth_yaw = raw_yaw
+            return (self.smooth_roll, self.smooth_pitch, self.smooth_throttle, self.smooth_yaw)
+
+        self._two_anchor_z = None
+
+        if gesture in ("PEACE", "THREE"):
+            raw_roll = 1500
+            raw_pitch = 1500
+            raw_throttle = 1500
+            # Full-width, less-sensitive yaw band centered at 1500.
+            raw_yaw = self._dz(int(np.interp(
+                keypoints[9][0], [0.0, 1.0], [1250, 1750])))
+
+            # Instant mode: no EMA so yaw starts/stops quickly.
+            self.smooth_roll = raw_roll
+            self.smooth_pitch = raw_pitch
+            self.smooth_throttle = raw_throttle
+            self.smooth_yaw = raw_yaw
+            return (self.smooth_roll, self.smooth_pitch, self.smooth_throttle, self.smooth_yaw)
+
+        if gesture in ("FOUR", "FIVE"):
+            raw_roll = self._dz(int(np.interp(
+                keypoints[9][0], [self.cam_min, self.cam_max], [1250, 1750])))
+            raw_pitch = self._dz(int(np.interp(
+                keypoints[9][1], [self.cam_min, self.cam_max], [1750, 1250])))
+            raw_throttle = 1500
+            raw_yaw = 1500
 
             self.smooth_roll = self._ema(raw_roll, self.smooth_roll)
             self.smooth_pitch = self._ema(raw_pitch, self.smooth_pitch)
             self.smooth_throttle = self._ema(raw_throttle, self.smooth_throttle)
             self.smooth_yaw = self._ema(raw_yaw, self.smooth_yaw)
-
             return (self.smooth_roll, self.smooth_pitch, self.smooth_throttle, self.smooth_yaw)
 
-        return 1500, 1500, 1000, 1500
+        return 1500, 1500, 1500, 1500
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SERIAL OUTPUT
@@ -220,14 +258,59 @@ class ArduinoSerial:
         time.sleep(2)
         print(f"[Arduino] Connected on {port} @ {baud} baud")
 
+        # Output spike guard state
+        self._last_sent = None
+        self._pending_spike = None
+        self._max_jump = {"r": 120, "p": 120, "t": 100, "y": 120}
+
+    def _sanitize(self, roll, pitch, throttle, yaw):
+        vals = []
+        for v in (roll, pitch, throttle, yaw):
+            try:
+                vals.append(int(v))
+            except Exception:
+                vals.append(1500)
+        return tuple(max(1000, min(2000, v)) for v in vals)
+
+    def _is_immediate_preset(self, cmd):
+        return cmd in {
+            (1500, 1500, 1500, 1500),
+            (1500, 1500, 1400, 1500),
+            (1500, 1500, 1600, 1500),
+        }
+
     def send(self, roll, pitch, throttle, yaw):
-        r, p, t, y = [max(1000, min(2000, v)) for v in (roll, pitch, throttle, yaw)]
+        cmd = self._sanitize(roll, pitch, throttle, yaw)
+
+        if self._last_sent is None or self._is_immediate_preset(cmd):
+            out = cmd
+            self._pending_spike = None
+        else:
+            dr = abs(cmd[0] - self._last_sent[0])
+            dp = abs(cmd[1] - self._last_sent[1])
+            dt = abs(cmd[2] - self._last_sent[2])
+            dy = abs(cmd[3] - self._last_sent[3])
+            spike = (
+                dr > self._max_jump["r"]
+                or dp > self._max_jump["p"]
+                or dt > self._max_jump["t"]
+                or dy > self._max_jump["y"]
+            )
+            if spike and self._pending_spike != cmd:
+                self._pending_spike = cmd
+                out = self._last_sent
+            else:
+                self._pending_spike = None
+                out = cmd
+
+        r, p, t, y = out
         try:
             self._ser.write(f"R:{r} P:{p} T:{t} Y:{y}\n".encode())
             try:
                 self._ser.flush()
             except Exception:
                 pass
+            self._last_sent = out
             time.sleep(0.04)
         except Exception as e:
             print(f"[Arduino] Write error: {e}")
@@ -390,7 +473,7 @@ def main():
     except Exception as e:
         print(f"Laser Dot Projector not available on this device: {e}", flush=True)
 
-    print("Running — FIVE=fly  FIST/PEACE=stop  'q'=quit  'r'=recalibrate yaw", flush=True)
+    print("Running — ONE=hover  TWO=depth-throttle  OK=fixed T1600  PEACE/THREE=yaw  FOUR/FIVE=cruise  FIST=descend  'q'=quit  'r'=recalibrate yaw", flush=True)
 
     last_depth_mm = float((THROTTLE_NEAR_MM + THROTTLE_FAR_MM) / 2)
 
@@ -409,6 +492,8 @@ def main():
             if in_video is None:
                 continue
 
+            gesture_to_use = "NONE"
+
             # NON-BLOCKING depth - grab latest available or None
             in_depth = q_depth.tryGet()
             # NOTE: If depth is None, we use last_depth_mm and skip depth lookup
@@ -423,7 +508,7 @@ def main():
             result = mp_landmarker.detect(mp_image_obj)
 
             # Initialize default commands
-            roll, pitch, throttle, yaw = 1500, 1500, 1000, 1500
+            roll, pitch, throttle, yaw = 1500, 1500, 1500, 1500
 
             # Process detection results - ALL DRAWING INSIDE THIS BLOCK
             if result and result.hand_landmarks and len(result.hand_landmarks) > 0:
@@ -488,9 +573,11 @@ def main():
                 arduino.send(roll, pitch, throttle, yaw)
 
             # OPTIMIZED HUD: Minimal text
-            cv2.putText(frame, f"R:{roll} P:{pitch} T:{throttle} Y:{yaw}", (10, 25),
+            cv2.putText(frame, f"Gesture: {gesture_to_use}", (10, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 220, 220), 1)
+            cv2.putText(frame, f"R:{roll} P:{pitch} T:{throttle} Y:{yaw}", (10, 45),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-            cv2.putText(frame, f"D:{last_depth_mm:.0f}mm", (10, 45),
+            cv2.putText(frame, f"D:{last_depth_mm:.0f}mm", (10, 65),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 0), 1)
 
             # Display every 2nd frame - ONLY call cv2.waitKey() here to avoid latency

@@ -49,17 +49,75 @@ class ArduinoSerial:
             # This prevents the PC from flooding the Arduino while it boots the sketch.
             time.sleep(2)
             print(f"[Arduino] Connected on {chosen} @ {baud} baud")
+
+            # Output spike guard state
+            self._last_sent = None
+            self._pending_spike = None
+
+            # Maximum allowed one-frame jump before confirmation is required
+            self._max_jump = {
+                "r": 120,
+                "p": 120,
+                "t": 200,
+                "y": 120,
+            }
         except Exception as e:
             raise RuntimeError(f"Failed to open serial port {chosen}: {e}") from e
 
+    def _sanitize(self, roll: int, pitch: int, throttle: int, yaw: int):
+        vals = []
+        for v in (roll, pitch, throttle, yaw):
+            try:
+                vals.append(int(v))
+            except Exception:
+                vals.append(1500)
+        return tuple(max(1000, min(2000, v)) for v in vals)
+
+    def _is_immediate_preset(self, cmd):
+        # Let common mode-transition presets pass instantly.
+        return cmd in {
+            (1500, 1500, 1500, 1500),
+            (1500, 1500, 1400, 1500),
+            (1500, 1500, 1600, 1500),
+        }
+
     def send(self, roll: int, pitch: int, throttle: int, yaw: int) -> None:
-        r, p, t, y = [max(1000, min(2000, v)) for v in (roll, pitch, throttle, yaw)]
+        r, p, t, y = self._sanitize(roll, pitch, throttle, yaw)
+
+        cmd = (r, p, t, y)
+        if self._last_sent is None or self._is_immediate_preset(cmd):
+            out = cmd
+            self._pending_spike = None
+        else:
+            dr = abs(cmd[0] - self._last_sent[0])
+            dp = abs(cmd[1] - self._last_sent[1])
+            dt = abs(cmd[2] - self._last_sent[2])
+            dy = abs(cmd[3] - self._last_sent[3])
+
+            spike = (
+                dr > self._max_jump["r"]
+                or dp > self._max_jump["p"]
+                or dt > self._max_jump["t"]
+                or dy > self._max_jump["y"]
+            )
+
+            if spike and self._pending_spike != cmd:
+                # First suspicious frame: hold previous command.
+                self._pending_spike = cmd
+                out = self._last_sent
+            else:
+                # Non-spike, or confirmed same spike twice in a row.
+                self._pending_spike = None
+                out = cmd
+
+        r, p, t, y = out
         try:
             self._ser.write(f"R:{r} P:{p} T:{t} Y:{y}\n".encode())
             try:
                 self._ser.flush()
             except Exception:
                 pass
+            self._last_sent = out
             # Throttle PC -> Arduino updates: give Arduino 40ms to process and avoid overrun
             time.sleep(0.04)
         except Exception as e:

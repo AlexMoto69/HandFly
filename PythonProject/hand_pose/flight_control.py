@@ -7,19 +7,19 @@ Uses Landmark 9 (middle finger knuckle) 3D position from OAK-D stereo depth.
 Saves anchor when gesture detected, then maps movement deltas to PWM outputs.
 
 Gestures:
-    ONE        -> Failsafe / Brake (hover, clear anchor)
-    THUMBS_UP  -> Takeoff & Drift (full 3D: throttle=Y, pitch=Z, roll=X)
-    FOUR/FIVE  -> Cruise Mode (altitude hold: pitch=Z, roll=X)
-    PEACE      -> Yaw Rotation (yaw=X only)
+    ONE        -> Hover / stay in place (all channels centered)
+    TWO        -> Depth throttle (closer hand = more throttle, floor at 1500)
+    PEACE/THREE-> Yaw-only movement from side-to-side hand motion (1250-1750)
+    OK         -> Fixed throttle hold at 1600; roll/pitch/yaw centered
+    FOUR/FIVE  -> Cruise Mode (narrower pitch/roll band)
     FIST       -> Land (auto-level descent, clear anchor)
 """
 import numpy as np
 from typing import List, Tuple, Optional
 
 from .config import (
-    THUMBS_UP_THROTTLE_SCALE, THUMBS_UP_PITCH_SCALE, THUMBS_UP_ROLL_SCALE,
-    CRUISE_PITCH_SCALE, CRUISE_ROLL_SCALE,
-    PEACE_YAW_SCALE
+    CRUISE_PITCH_SCALE,
+    CRUISE_ROLL_SCALE,
 )
 
 
@@ -189,7 +189,9 @@ class DroneGestureController:
         if gesture is None or gesture == "UNKNOWN":
             return (1500, 1500, 1500, 1500)
 
-        # STATE 1: ONE (Failsafe / Brake) - Clear anchor immediately
+        gesture_mode = "PEACE_THREE" if gesture in ("PEACE", "THREE") else gesture
+
+        # STATE 1: ONE (Hover / stay in place) - Clear anchor immediately
         if gesture == "ONE":
             self.anchor_x_mm = None
             self.anchor_y_mm = None
@@ -204,20 +206,17 @@ class DroneGestureController:
 
             return (self.smooth_roll, self.smooth_pitch, self.smooth_throttle, self.smooth_yaw)
 
-        # STATE 1B: TWO (Failsafe / Brake) - Also clear anchor immediately (same as ONE)
-        if gesture == "TWO":
-            self.anchor_x_mm = None
-            self.anchor_y_mm = None
-            self.anchor_z_mm = None
-            self.current_gesture = "TWO"
-
-            # Neutral hover
+        # STATE 2: OK (Fixed throttle hold) - independent from depth/hand movement
+        if gesture == "OK":
+            self.current_gesture = "OK"
             self.smooth_roll = 1500
             self.smooth_pitch = 1500
-            self.smooth_throttle = 1500
+            self.smooth_throttle = 1600
             self.smooth_yaw = 1500
-
             return (self.smooth_roll, self.smooth_pitch, self.smooth_throttle, self.smooth_yaw)
+
+        # NOTE: Do not set self.current_gesture here; we want anchor reset to happen
+        # in the gesture-change block below for TWO/PEACE/THREE.
 
         # STATE 5: FIST (Land) - Clear anchor
         if gesture == "FIST":
@@ -240,7 +239,7 @@ class DroneGestureController:
         # If depth not available, use last known position (don't return neutral)
         if curr_x_mm is None or curr_y_mm is None or curr_z_mm is None:
             # Use last smoothed values instead of returning neutral
-            if gesture == "FIST" or gesture == "PEACE":
+            if gesture in ("FIST", "PEACE", "THREE"):
                 # These don't need 3D, they're handled above
                 pass
             else:
@@ -255,13 +254,13 @@ class DroneGestureController:
 
         # Check if gesture changed - if so, save new anchor
         # SPECIAL: When switching gestures, RESET Z-AXIS (depth) to recalibrate
-        if gesture != self.current_gesture:
+        if gesture_mode != self.current_gesture:
             # Always update X and Y to current position
             self.anchor_x_mm = curr_x_mm
             self.anchor_y_mm = curr_y_mm
             # RESET Z-AXIS when gesture changes - critical for accurate throttle
             self.anchor_z_mm = curr_z_mm
-            self.current_gesture = gesture
+            self.current_gesture = gesture_mode
             print(f"[FlightCtrl] Gesture changed to '{gesture}' - Z-axis RESET: X={curr_x_mm:.0f}mm Y={curr_y_mm:.0f}mm Z={curr_z_mm:.0f}mm")
 
         # Ensure anchor is set (safety check)
@@ -269,7 +268,7 @@ class DroneGestureController:
             self.anchor_x_mm = curr_x_mm
             self.anchor_y_mm = curr_y_mm
             self.anchor_z_mm = curr_z_mm
-            self.current_gesture = gesture
+            self.current_gesture = gesture_mode
             print(f"[FlightCtrl] Anchor initialized for '{gesture}': X={curr_x_mm:.0f}mm Y={curr_y_mm:.0f}mm Z={curr_z_mm:.0f}mm")
 
         # Calculate deltas (movement from anchor)
@@ -284,49 +283,52 @@ class DroneGestureController:
         delta_z = self._apply_deadzone(delta_z, DEADZONE_Z_MM)
 
 
-        # STATE 2: OK (Takeoff & Drift) - Full 3D control
-        if gesture == "OK":
-            # Throttle: Vertical hand movement (positive Y = UP = climb)
-            # Invert because screen Y goes down as values increase
-            # CLAMPED: Never go below 1500 (can only climb, not descend)
-            raw_throttle = max(1500, int(1500 - delta_y * THUMBS_UP_THROTTLE_SCALE))
-
-            # Pitch: Depth (positive delta_z = away = pitch UP/back)
-            raw_pitch = int(1500 + delta_z * THUMBS_UP_PITCH_SCALE)
-
-            # Roll: Horizontal movement
-            raw_roll = int(1500 + delta_x * THUMBS_UP_ROLL_SCALE)
-
-            # Yaw: Locked
-            raw_yaw = 1500
-
-        # STATE 3: FOUR/FIVE (Cruise Mode) - Altitude hold, pitch/roll control
-        elif gesture in ("FOUR", "FIVE"):
-            # Throttle: Locked
-            raw_throttle = 1500
-
-            # Pitch: Depth (positive delta_z = away = pitch UP/back)
-            raw_pitch = int(1500 + delta_z * CRUISE_PITCH_SCALE)
-
-            # Roll: Horizontal movement
-            raw_roll = int(1500 + delta_x * CRUISE_ROLL_SCALE)
-
-            # Yaw: Locked
-            raw_yaw = 1500
-
-        # STATE 4: PEACE (Yaw Rotation) - Yaw control only
-        elif gesture == "PEACE":
-            # Throttle: Locked
-            raw_throttle = 1500
-
-            # Pitch: Locked
+        # STATE 3: TWO (Depth throttle) - closer hand raises throttle, never below 1500
+        if gesture == "TWO":
+            # Relative depth from the TWO entry point: first detected frame = 1500.
+            # Moving the hand closer increases throttle; moving away returns to 1500.
+            raw_throttle = int(1500 - delta_z)
+            raw_throttle = max(1500, min(2000, raw_throttle))
             raw_pitch = 1500
-
-            # Roll: Locked
             raw_roll = 1500
+            raw_yaw = 1500
 
-            # Yaw: Horizontal movement (delta_x)
-            raw_yaw = int(1500 + delta_x * PEACE_YAW_SCALE)
+            # Bypass EMA for crisp throttle hold/release behavior.
+            self.smooth_roll = raw_roll
+            self.smooth_pitch = raw_pitch
+            self.smooth_throttle = raw_throttle
+            self.smooth_yaw = raw_yaw
+            return (self.smooth_roll, self.smooth_pitch, self.smooth_throttle, self.smooth_yaw)
+
+        # STATE 4: PEACE/THREE (Yaw only) - side-to-side hand motion controls yaw
+        elif gesture in ("PEACE", "THREE"):
+            raw_throttle = 1500
+            raw_pitch = 1500
+            raw_roll = 1500
+            # Full-width, less-sensitive yaw band centered at 1500.
+            raw_yaw = int(np.interp(
+                keypoints_norm[9][0],
+                [0.0, 1.0],
+                [1250, 1750],
+            ))
+
+            # Bypass EMA so yaw commands start/stop quickly.
+            self.smooth_roll = raw_roll
+            self.smooth_pitch = raw_pitch
+            self.smooth_throttle = raw_throttle
+            self.smooth_yaw = max(1250, min(1750, self._dz(raw_yaw)))
+            return (self.smooth_roll, self.smooth_pitch, self.smooth_throttle, self.smooth_yaw)
+
+        # STATE 5: FOUR/FIVE (Cruise Mode) - altitude hold with narrower roll/pitch band
+        elif gesture in ("FOUR", "FIVE"):
+            raw_throttle = 1500
+            # Apply cruise scales so normal hand movement can use most of the band.
+            raw_pitch = int(1500 + delta_y * CRUISE_PITCH_SCALE)
+            raw_roll = int(1500 + delta_x * CRUISE_ROLL_SCALE)
+            raw_yaw = 1500
+
+            raw_pitch = max(1250, min(1750, raw_pitch))
+            raw_roll = max(1250, min(1750, raw_roll))
 
         else:
             # Unknown gesture - return neutral

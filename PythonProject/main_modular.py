@@ -84,7 +84,7 @@ def main():
         min_hand_presence_confidence=0.5
     )
     mp_landmarker = hand_landmarker.HandLandmarker.create_from_options(options)
-    print("✓ HandLandmarker initialized (IMAGE mode - synchronous, ~20-25ms latency)", flush=True)
+    print("[OK] HandLandmarker initialized (IMAGE mode - synchronous, ~20-25ms latency)", flush=True)
 
     # Build DepthAI pipeline
     print("Creating device...", flush=True)
@@ -175,11 +175,11 @@ def main():
     try:
         device.setIrLaserDotProjectorIntensity(0.4)  # 40% intensity
         device.setIrFloodLightIntensity(0.0)
-        print("✓ Active Stereo ENABLED (Laser Dot Projector + SpatialLocationCalculator)", flush=True)
+        print("[OK] Active Stereo ENABLED (Laser Dot Projector + SpatialLocationCalculator)", flush=True)
     except Exception as e:
         print(f"Laser Dot Projector not available on this device: {e}", flush=True)
 
-    print("Running — FIVE=fly  FIST/PEACE=stop  'q'=quit  'r'=recalibrate yaw", flush=True)
+    print("Running — ONE=hover  TWO=depth-throttle  OK=fixed T1600  PEACE/THREE=yaw  FOUR/FIVE=cruise  FIST=descend  'q'=quit  'r'=recalibrate yaw", flush=True)
 
     last_depth_mm = float((THROTTLE_NEAR_MM + THROTTLE_FAR_MM) / 2)
 
@@ -199,6 +199,8 @@ def main():
             in_video = q_video.get()
             if in_video is None:
                 continue
+
+            gesture_to_use = "NONE"
 
             # NON-BLOCKING depth - grab latest available or None
             in_depth = q_depth.tryGet()
@@ -304,7 +306,7 @@ def main():
                 arduino.send(roll, pitch, throttle, yaw)
 
             # PERSISTENT HUD: Always show debug info in top right
-            cv2.putText(frame, f"Gesture: {gesture_to_use if 'gesture_to_use' in locals() else 'NONE'}", (w - 280, 10),
+            cv2.putText(frame, f"Gesture: {gesture_to_use}", (w - 280, 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 220, 220), 1)
             cv2.putText(frame, f"R:{roll} P:{pitch} T:{throttle} Y:{yaw}", (w - 280, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
