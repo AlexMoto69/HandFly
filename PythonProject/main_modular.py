@@ -10,21 +10,23 @@ Run:
     python main_modular.py --port COM3  # with Arduino
 """
 
-from typing import List, Tuple, Optional
 import argparse
 import cv2
 import numpy as np
 import depthai as dai
-import time
 import warnings
-import math
+
+try:
+    import keyboard  # For reliable held-key detection (pip install keyboard)
+except ImportError:
+    keyboard = None
 
 from hand_pose.gesture import recognize_gesture
 from hand_pose.flight_control import DroneGestureController
 from hand_pose.serial_output import ArduinoSerial
 from hand_pose.config import (
     HAND_CONNECTIONS, COLOR_JOINT, COLOR_BONE,
-    THROTTLE_NEAR_MM, THROTTLE_FAR_MM, YAW_ANGLE_MAX
+    THROTTLE_NEAR_MM, THROTTLE_FAR_MM
 )
 
 
@@ -179,9 +181,23 @@ def main():
     except Exception as e:
         print(f"Laser Dot Projector not available on this device: {e}", flush=True)
 
-    print("Running — ONE=hover  TWO=depth-throttle  OK=fixed T1600  PEACE/THREE=yaw  FOUR/FIVE=cruise  FIST=descend  'q'=quit  'r'=recalibrate yaw", flush=True)
+    print("Running — SPACE=arm (in KB mode)  P=keyboard mode  G=gesture mode  W/S=throttle  A/D=yaw  I/J/K/L=tilt/pitch/roll  ONE=hover  FIST=descend  q=quit  r=recalibrate", flush=True)
 
     last_depth_mm = float((THROTTLE_NEAR_MM + THROTTLE_FAR_MM) / 2)
+
+    # Control mode: GESTURE is the default; P switches to manual keyboard control.
+    control_mode = "GESTURE"
+    keyboard_roll = 1500
+    keyboard_pitch = 1500
+    keyboard_throttle = 1000  # start low for safety in keyboard mode
+    keyboard_yaw = 1500
+    KEY_STEP = 10
+    THROTTLE_MIN_SAFE = 1000
+    THROTTLE_MAX_SAFE = 2000
+
+    # Space key arming: only in KEYBOARD mode
+    space_pressed = False
+    ARM_COMMAND = (1500, 1500, 1000, 2000)
 
     # Gesture debouncing: require N consistent frames before we commit a gesture
     GESTURE_HOLD_FRAMES = args.gesture_hold
@@ -275,9 +291,8 @@ def main():
                 # Use last valid reported gesture, or current if first time
                 gesture_to_use = _reported_gesture if _reported_gesture is not None else current_gesture
 
-                # Only send non-UNKNOWN gestures to flight controller
-                if gesture_to_use != "UNKNOWN":
-
+                # Only run the gesture controller while in gesture mode.
+                if control_mode == "GESTURE" and gesture_to_use != "UNKNOWN":
                     # Pass depth_frame and frame_shape to flight controller for 3D spatial anchor
                     roll, pitch, throttle, yaw = flight_ctrl.process_hand(gesture_to_use, kpts, depth_frame, frame.shape)
 
@@ -301,28 +316,98 @@ def main():
                 cv2.putText(frame, hud, (max(10, w//2 - 80), 40), cv2.FONT_HERSHEY_DUPLEX,
                             1.0, (0, 220, 220), 2, cv2.LINE_AA)
 
+            # Manual keyboard control overlay
+            # P = keyboard mode, G = gesture mode
+            # W/S = throttle, A/D = yaw, arrows = roll/pitch
+            key_code = cv2.waitKey(1)
+            key = key_code & 0xFF if key_code != -1 else 0
+            space_pressed = False
+            if key == ord("q"):
+                break
+            elif key == ord("r"):
+                flight_ctrl.recalibrate_yaw()
+            elif key == ord("p") and control_mode != "KEYBOARD":
+                control_mode = "KEYBOARD"
+                keyboard_roll = 1500
+                keyboard_pitch = 1500
+                keyboard_throttle = THROTTLE_MIN_SAFE
+                keyboard_yaw = 1500
+                print("[Control] Switched to KEYBOARD mode", flush=True)
+            elif key == ord("g"):
+                control_mode = "GESTURE"
+                print("[Control] Switched to GESTURE mode", flush=True)
+
+            # Keyboard control: use keyboard library for held-key detection
+            if keyboard is not None and control_mode == "KEYBOARD":
+                space_pressed = keyboard.is_pressed('space')
+                w_pressed = keyboard.is_pressed('w'); s_pressed = keyboard.is_pressed('s')
+                a_pressed = keyboard.is_pressed('a'); d_pressed = keyboard.is_pressed('d')
+                i_pressed = keyboard.is_pressed('i')
+                j_pressed = keyboard.is_pressed('j')
+                k_pressed = keyboard.is_pressed('k')
+                l_pressed = keyboard.is_pressed('l')
+
+                if space_pressed:
+                    roll, pitch, throttle, yaw = ARM_COMMAND
+                else:
+                    if w_pressed: keyboard_throttle = min(THROTTLE_MAX_SAFE, keyboard_throttle + KEY_STEP)
+                    if s_pressed: keyboard_throttle = max(THROTTLE_MIN_SAFE, keyboard_throttle - KEY_STEP)
+                    if a_pressed: keyboard_yaw = max(1000, keyboard_yaw - KEY_STEP)
+                    if d_pressed: keyboard_yaw = min(2000, keyboard_yaw + KEY_STEP)
+                    if i_pressed: keyboard_pitch = max(1000, keyboard_pitch - KEY_STEP)
+                    if j_pressed: keyboard_roll = max(1000, keyboard_roll - KEY_STEP)
+                    if k_pressed: keyboard_pitch = min(2000, keyboard_pitch + KEY_STEP)
+                    if l_pressed: keyboard_roll = min(2000, keyboard_roll + KEY_STEP)
+                    roll, pitch, throttle, yaw = keyboard_roll, keyboard_pitch, keyboard_throttle, keyboard_yaw
+
+            elif control_mode == "KEYBOARD":
+                space_pressed = (key == 32)
+                if space_pressed:
+                    roll, pitch, throttle, yaw = ARM_COMMAND
+                else:
+                    if key == ord("w"): keyboard_throttle = min(THROTTLE_MAX_SAFE, keyboard_throttle + KEY_STEP)
+                    elif key == ord("s"): keyboard_throttle = max(THROTTLE_MIN_SAFE, keyboard_throttle - KEY_STEP)
+                    elif key == ord("a"): keyboard_yaw = max(1000, keyboard_yaw - KEY_STEP)
+                    elif key == ord("d"): keyboard_yaw = min(2000, keyboard_yaw + KEY_STEP)
+                    elif key == ord("i"): keyboard_pitch = max(1000, keyboard_pitch - KEY_STEP)
+                    elif key == ord("j"): keyboard_roll = max(1000, keyboard_roll - KEY_STEP)
+                    elif key == ord("l"): keyboard_roll = min(2000, keyboard_roll + KEY_STEP)
+                    roll, pitch, throttle, yaw = keyboard_roll, keyboard_pitch, keyboard_throttle, keyboard_yaw
+
+            # Gesture safety overrides: ONE / FIST always take priority.
+            if gesture_to_use in ("ONE", "FIST"):
+                control_mode = "GESTURE"
+                keyboard_roll = 1500
+                keyboard_pitch = 1500
+                keyboard_yaw = 1500
+                if gesture_to_use == "ONE":
+                    keyboard_throttle = 1000
+                    roll, pitch, throttle, yaw = 1500, 1500, 1500, 1500
+                elif gesture_to_use == "FIST":
+                    roll, pitch, throttle, yaw = 1500, 1500, 1400, 1500
+
             # Send to Arduino every frame (flight control is real-time)
             if arduino:
-                arduino.send(roll, pitch, throttle, yaw)
+                arduino.send(roll, pitch, throttle, yaw, force=(control_mode == "KEYBOARD" and space_pressed))
 
             # PERSISTENT HUD: Always show debug info in top right
             cv2.putText(frame, f"Gesture: {gesture_to_use}", (w - 280, 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 220, 220), 1)
             cv2.putText(frame, f"R:{roll} P:{pitch} T:{throttle} Y:{yaw}", (w - 280, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-            cv2.putText(frame, f"D:{last_depth_mm:.0f}mm", (w - 280, 50),
+            cv2.putText(frame, f"Mode: {control_mode}", (w - 280, 50),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 120), 1)
+            arm_status = "ARM!" if (space_pressed and control_mode == "KEYBOARD") else "ready"
+            arm_color = (0, 0, 255) if space_pressed else (0, 255, 0)
+            cv2.putText(frame, f"ARM: {arm_status}", (w - 280, 70),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, arm_color, 1)
+            cv2.putText(frame, f"D:{last_depth_mm:.0f}mm", (w - 280, 90),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 0), 1)
 
             # Display every 2nd frame - ONLY call cv2.waitKey() here to avoid latency
             display_counter += 1
             if display_counter % 2 == 0:
                 cv2.imshow("Hand Pose Ground Station", frame)
-                # ONLY call waitKey on display frames to avoid latency on every loop
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord("q"):
-                    break
-                elif key == ord("r"):
-                    flight_ctrl.recalibrate_yaw()
 
             frame_count += 1
 
