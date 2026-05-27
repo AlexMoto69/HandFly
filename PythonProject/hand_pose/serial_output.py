@@ -52,8 +52,13 @@ class ArduinoSerial:
             print(f"[Arduino] Connected on {chosen} @ {baud} baud")
 
             # Output spike guard state
+            # Output spike guard state
             self._last_sent = None
             self._pending_spike = None
+
+            # --- ADD THESE TWO LINES ---
+            self._last_send_time = 0.0
+            self._send_interval = 0.02
 
             # Background RX logging state (echo Arduino prints into Python terminal)
             # self._rx_stop = threading.Event()
@@ -109,6 +114,13 @@ class ArduinoSerial:
         }
 
     def send(self, roll: int, pitch: int, throttle: int, yaw: int, force: bool = False) -> None:
+        import time  # Ensure time is available if not imported globally
+
+        # 1. Non-blocking rate limiter: Skip if we sent data too recently
+        current_time = time.perf_counter()
+        if not force and (current_time - self._last_send_time < self._send_interval):
+            return
+
         r, p, t, y = self._sanitize(roll, pitch, throttle, yaw)
 
         cmd = (r, p, t, y)
@@ -122,10 +134,10 @@ class ArduinoSerial:
             dy = abs(cmd[3] - self._last_sent[3])
 
             spike = (
-                dr > self._max_jump["r"]
-                or dp > self._max_jump["p"]
-                or dt > self._max_jump["t"]
-                or dy > self._max_jump["y"]
+                    dr > self._max_jump["r"]
+                    or dp > self._max_jump["p"]
+                    or dt > self._max_jump["t"]
+                    or dy > self._max_jump["y"]
             )
 
             if spike and self._pending_spike != cmd:
@@ -139,14 +151,13 @@ class ArduinoSerial:
 
         r, p, t, y = out
         try:
+            # 2. Write to serial
             self._ser.write(f"R:{r} P:{p} T:{t} Y:{y}\n".encode())
-            try:
-                self._ser.flush()
-            except Exception:
-                pass
+
+            # 3. Record the exact time we successfully sent the data
+            self._last_send_time = time.perf_counter()
             self._last_sent = out
-            # Throttle PC -> Arduino updates: give Arduino 40ms to process and avoid overrun
-            time.sleep(0.04)
+
         except Exception as e:
             print(f"[Arduino] Write error: {e}")
 

@@ -211,9 +211,13 @@ def main():
         h, w = 720, 1280
 
         while True:
-            # BLOCKING frame retrieval - wait for fresh video frame (stabilizes OS thread)
-            in_video = q_video.get()
+            # NON-BLOCKING frame retrieval - grab the absolute newest frame or skip
+            in_video = q_video.tryGet()
+
+            # If no new frame is ready, briefly yield the thread and try again
             if in_video is None:
+                import time
+                time.sleep(0.001)  # 1ms sleep prevents 100% CPU usage while waiting
                 continue
 
             gesture_to_use = "NONE"
