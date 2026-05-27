@@ -15,7 +15,6 @@ numpy==2.4.6                # pinned to the tested wheel
 
 # Serial Communication
 pyserial>=3.5               # Arduino serial communication
-keyboard>=0.13.5            # Keyboard input for held-key detection
 
 # Imaging
 Pillow>=10.0.0              # PIL for image handling

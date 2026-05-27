@@ -67,16 +67,6 @@ class DroneGestureController:
         """Exponential Moving Average filter"""
         return int(self.alpha * raw + (1.0 - self.alpha) * prev)
 
-    def recalibrate_yaw(self) -> None:
-        """Reset yaw state back to center.
-
-        The modular controller does not maintain a separate yaw calibration
-        model yet, so this keeps the hotkey safe and predictable by centering
-        the filtered yaw output immediately.
-        """
-        self.smooth_yaw = 1500
-        print("[FlightCtrl] Yaw recalibrated to center.")
-
     def _apply_deadzone(self, delta_mm: float, deadzone_mm: float) -> float:
         """
         Apply deadzone: if delta is smaller than threshold, snap to 0.

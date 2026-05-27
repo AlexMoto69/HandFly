@@ -1,6 +1,5 @@
 from typing import Optional
 import time
-# import threading
 
 
 class ArduinoSerial:
@@ -55,11 +54,6 @@ class ArduinoSerial:
             self._last_sent = None
             self._pending_spike = None
 
-            # Background RX logging state (echo Arduino prints into Python terminal)
-            # self._rx_stop = threading.Event()
-            # self._rx_thread = threading.Thread(target=self._rx_loop, daemon=True)
-            # self._rx_thread.start()
-
             # Maximum allowed one-frame jump before confirmation is required
             self._max_jump = {
                 "r": 120,
@@ -69,27 +63,6 @@ class ArduinoSerial:
             }
         except Exception as e:
             raise RuntimeError(f"Failed to open serial port {chosen}: {e}") from e
-
-    # def _rx_loop(self):
-    #     try:
-    #         while not getattr(self, "_rx_stop", None) or not self._rx_stop.is_set():
-    #             try:
-    #                 raw = self._ser.readline()
-    #             except Exception:
-    #                 break
-    #
-    #             if not raw:
-    #                 continue
-    #
-    #             try:
-    #                 line = raw.decode(errors="replace").strip()
-    #             except Exception:
-    #                 line = repr(raw)
-    #
-    #             if line:
-    #                 print(f"[Arduino RX] {line}")
-    #     except Exception:
-    #         pass
 
     def _sanitize(self, roll: int, pitch: int, throttle: int, yaw: int):
         vals = []
@@ -108,11 +81,11 @@ class ArduinoSerial:
             (1500, 1500, 1600, 1500),
         }
 
-    def send(self, roll: int, pitch: int, throttle: int, yaw: int, force: bool = False) -> None:
+    def send(self, roll: int, pitch: int, throttle: int, yaw: int) -> None:
         r, p, t, y = self._sanitize(roll, pitch, throttle, yaw)
 
         cmd = (r, p, t, y)
-        if force or self._last_sent is None or self._is_immediate_preset(cmd):
+        if self._last_sent is None or self._is_immediate_preset(cmd):
             out = cmd
             self._pending_spike = None
         else:
@@ -152,10 +125,6 @@ class ArduinoSerial:
 
     def close(self):
         try:
-            # if hasattr(self, "_rx_stop"):
-            #     self._rx_stop.set()
-            # if hasattr(self, "_rx_thread") and self._rx_thread and self._rx_thread.is_alive():
-            #     self._rx_thread.join(timeout=1.0)
             if hasattr(self, "_ser") and self._ser and self._ser.is_open:
                 self._ser.close()
                 print("[Arduino] Port closed.")
