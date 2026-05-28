@@ -20,6 +20,7 @@ from typing import List, Tuple, Optional
 from .config import (
     CRUISE_PITCH_SCALE,
     CRUISE_ROLL_SCALE,
+    HOVER_THROTTLE,
 )
 
 
@@ -195,9 +196,9 @@ class DroneGestureController:
             (roll, pitch, throttle, yaw) each int in [1000, 2000]
         """
 
-        # Handle None/Unknown gestures - return neutral HOVER (1500 throttle for safety)
+        # Handle None/Unknown gestures - return neutral HOVER
         if gesture is None or gesture == "UNKNOWN":
-            return (1500, 1500, 1500, 1500)
+            return (1500, 1500, HOVER_THROTTLE, 1500)
 
         gesture_mode = "PEACE_THREE" if gesture in ("PEACE", "THREE") else gesture
 
@@ -211,7 +212,7 @@ class DroneGestureController:
             # Neutral hover
             self.smooth_roll = 1500
             self.smooth_pitch = 1500
-            self.smooth_throttle = 1500
+            self.smooth_throttle = HOVER_THROTTLE
             self.smooth_yaw = 1500
 
             return (self.smooth_roll, self.smooth_pitch, self.smooth_throttle, self.smooth_yaw)
@@ -221,7 +222,7 @@ class DroneGestureController:
             self.current_gesture = "OK"
             self.smooth_roll = 1500
             self.smooth_pitch = 1500
-            self.smooth_throttle = 1600
+            self.smooth_throttle = HOVER_THROTTLE + 100
             self.smooth_yaw = 1500
             return (self.smooth_roll, self.smooth_pitch, self.smooth_throttle, self.smooth_yaw)
 
@@ -238,7 +239,7 @@ class DroneGestureController:
             # Auto-level descent
             self.smooth_roll = 1500
             self.smooth_pitch = 1500
-            self.smooth_throttle = 1400
+            self.smooth_throttle = HOVER_THROTTLE - 100
             self.smooth_yaw = 1500
 
             return (self.smooth_roll, self.smooth_pitch, self.smooth_throttle, self.smooth_yaw)
@@ -293,26 +294,18 @@ class DroneGestureController:
         delta_z = self._apply_deadzone(delta_z, DEADZONE_Z_MM)
 
 
-        # STATE 3: TWO (Depth throttle) - closer hand raises throttle, never below 1500
+        # STATE 3: TWO (Disabled for presentation - behaves like ONE)
         if gesture == "TWO":
-            # Relative depth from the TWO entry point: first detected frame = 1500.
-            # Moving the hand closer increases throttle; moving away returns to 1500.
-            raw_throttle = int(1500 - delta_z)
-            raw_throttle = max(1500, min(2000, raw_throttle))
-            raw_pitch = 1500
-            raw_roll = 1500
-            raw_yaw = 1500
-
-            # Bypass EMA for crisp throttle hold/release behavior.
-            self.smooth_roll = raw_roll
-            self.smooth_pitch = raw_pitch
-            self.smooth_throttle = raw_throttle
-            self.smooth_yaw = raw_yaw
+            # Disabled: just hover at HOVER_THROTTLE
+            self.smooth_roll = 1500
+            self.smooth_pitch = 1500
+            self.smooth_throttle = HOVER_THROTTLE
+            self.smooth_yaw = 1500
             return (self.smooth_roll, self.smooth_pitch, self.smooth_throttle, self.smooth_yaw)
 
         # STATE 4: PEACE/THREE (Yaw only) - side-to-side hand motion controls yaw
         elif gesture in ("PEACE", "THREE"):
-            raw_throttle = 1500
+            raw_throttle = HOVER_THROTTLE
             raw_pitch = 1500
             raw_roll = 1500
             # Full-width, less-sensitive yaw band centered at 1500.
@@ -331,7 +324,7 @@ class DroneGestureController:
 
         # STATE 5: FOUR/FIVE (Cruise Mode) - altitude hold with narrower roll/pitch band
         elif gesture in ("FOUR", "FIVE"):
-            raw_throttle = 1500
+            raw_throttle = HOVER_THROTTLE
             # Apply cruise scales so normal hand movement can use most of the band.
             raw_pitch = int(1500 + delta_y * CRUISE_PITCH_SCALE)
             raw_roll = int(1500 + delta_x * CRUISE_ROLL_SCALE)

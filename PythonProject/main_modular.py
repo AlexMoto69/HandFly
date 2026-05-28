@@ -26,7 +26,7 @@ from hand_pose.flight_control import DroneGestureController
 from hand_pose.serial_output import ArduinoSerial
 from hand_pose.config import (
     HAND_CONNECTIONS, COLOR_JOINT, COLOR_BONE,
-    THROTTLE_NEAR_MM, THROTTLE_FAR_MM
+    THROTTLE_NEAR_MM, THROTTLE_FAR_MM, HOVER_THROTTLE
 )
 
 
@@ -189,10 +189,10 @@ def main():
     control_mode = "GESTURE"
     keyboard_roll = 1500
     keyboard_pitch = 1500
-    keyboard_throttle = 1000  # start low for safety in keyboard mode
+    keyboard_throttle = HOVER_THROTTLE  # start at hover for safety in keyboard mode
     keyboard_yaw = 1500
     KEY_STEP = 10
-    THROTTLE_MIN_SAFE = 1000
+    THROTTLE_MIN_SAFE = HOVER_THROTTLE
     THROTTLE_MAX_SAFE = 2000
 
     # Space key arming: only in KEYBOARD mode
@@ -247,8 +247,8 @@ def main():
             result = mp_landmarker.detect(mp_image_obj)
 
             # Initialize default commands
-            # Throttle defaults to 1500 (hover) for safety when no hand
-            roll, pitch, throttle, yaw = 1500, 1500, 1500, 1500
+            # Throttle defaults to HOVER_THROTTLE for safety when no hand
+            roll, pitch, throttle, yaw = 1500, 1500, HOVER_THROTTLE, 1500
 
             # Process detection results - ALL DRAWING INSIDE THIS BLOCK
             if result and result.hand_landmarks and len(result.hand_landmarks) > 0:
@@ -385,10 +385,10 @@ def main():
                 keyboard_pitch = 1500
                 keyboard_yaw = 1500
                 if gesture_to_use == "ONE":
-                    keyboard_throttle = 1000
-                    roll, pitch, throttle, yaw = 1500, 1500, 1500, 1500
+                    keyboard_throttle = HOVER_THROTTLE
+                    roll, pitch, throttle, yaw = 1500, 1500, HOVER_THROTTLE, 1500
                 elif gesture_to_use == "FIST":
-                    roll, pitch, throttle, yaw = 1500, 1500, 1400, 1500
+                    roll, pitch, throttle, yaw = 1500, 1500, max(HOVER_THROTTLE-100,1000), 1500
 
             # Send to Arduino every frame (flight control is real-time)
             if arduino:

@@ -11,6 +11,10 @@ import textwrap
 PADDING              = 0.2
 CONFIDENCE_THRESHOLD = 0.5
 
+# ── Flight Control Throttle (for stabilize mode) ──────────────────────────────
+# Adjust this to match your drone's hover throttle value in stabilize mode
+HOVER_THROTTLE = 1250  # Neutral throttle for hover (adjust for your setup)
+
 # ── Stereo depth throttle range (millimetres from camera) ────────────────────
 # Hand THIS close  → T:2000 (full throttle)
 THROTTLE_NEAR_MM = 200    # 20 cm
